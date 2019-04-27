@@ -1,0 +1,3 @@
+[submodule "casvm"]
+	path = casvm
+	url = https://github.com/md5crypt/casvm.git
