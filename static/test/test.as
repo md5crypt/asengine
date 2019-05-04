@@ -1,28 +1,23 @@
-extern render '__render'
-extern delay '__delay'
-
 location village
 	object cow
 		on use 
-			unset cow.thread
-			set cow.hidden = true
-			render cow
+			hide self
+			unset self.thread
+
 	object mouse
-		on use
-			set village.mouse.frame = (village.mouse.frame == "alive") ? "dead" : "alive"
-			render village.mouse
+		on use show self (self.frame == "alive") ? "dead" : "alive"
+
 	object sun
+		on use
+			if !cow.thread
+				print "starting cow"
+				set cow.thread = {async fucking_cow}
 
 	function fucking_cow
 		while true
-			print cow.hidden
-			set cow.frame = "frame1"
-			render cow
+			show cow "frame1"
 			delay 500
-			set cow.frame = "frame2"
-			render cow
+			show cow "frame2"
 			delay 500
 
 render village
-
-set village.cow.thread = {async village.fucking_cow}

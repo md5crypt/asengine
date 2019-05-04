@@ -50,6 +50,9 @@ class AsEngine {
 	private locationMap!: Map<vm_mmid_t, AsEngine.LocationData>
 	private app: PIXI.Application
 	private timers: ThreadTimer[]
+	private runTimeout: NodeJS.Timeout | null
+	private busy: boolean
+	private dirty: boolean
 
 	constructor(vm: AsVm, app: PIXI.Application) {
 		this.vm = vm
@@ -58,6 +61,9 @@ class AsEngine {
 		this.redrawRequest = RedrawRequest.NONE
 		this.updateSet = new Set()
 		this.timers = []
+		this.runTimeout = null
+		this.busy = false
+		this.dirty = false
 	}
 
 	public requestRedrawObject(mmid: vm_mmid_t): string | null {
@@ -98,15 +104,23 @@ class AsEngine {
 	}
 
 	public run() {
+		if (this.busy) {
+			this.dirty = true
+			return
+		}
+		this.dirty = false
+		if (this.runTimeout !== null) {
+			clearTimeout(this.runTimeout)
+			this.runTimeout = null
+		}
 		const time = Date.now()
 		const newTimers = []
 		for (const timer of this.timers) {
 			const thread = this.vm.$._vm_memory_get_ptr(timer.thread) as vm_thread_t
 			const rcnt = this.vm.$u32[(thread + vm_thread_t.rnct) / 4]
-			console.log(rcnt)
 			if (rcnt == 1) {
 				this.vm.$._vm_dereference(thread, AsVm.Type.THREAD)
-			} else if (timer.expire < time) {
+			} else if (timer.expire <= time) {
 				this.vm.$._vm_dereference(thread, AsVm.Type.THREAD)
 				this.vm.$._vm_thread_push(thread)
 			} else {
@@ -117,12 +131,18 @@ class AsEngine {
 		this.vm.vmRun()
 		this.render()
 		if (this.timers.length) {
+			this.busy = true
 			requestAnimationFrame(() => {
-				let min = Infinity
-				for (const timer of this.timers) {
-					min = Math.min(min, timer.expire)
+				this.busy = false
+				if (this.dirty) {
+					this.run()
+				} else {
+					let min = Infinity
+					for (const timer of this.timers) {
+						min = Math.min(min, timer.expire)
+					}
+					this.runTimeout = setTimeout(() => (this.runTimeout = null, this.run()), Math.max(0, min - Date.now()))
 				}
-				setTimeout(() => this.run(), Math.max(0, min - Date.now()))
 			})
 		}
 	}
@@ -297,8 +317,7 @@ class AsEngine {
 		vm.$._vm_hashmap_get(hashmap, key, vmVariable)
 		if (AsVm.isType(heap[(vmVariable + vm_variable_t.type) / 4], AsVm.Type.CALLABLE)) {
 			vm.vmCall(heap[(vmVariable + vm_variable_t.data) / 4])
-			vm.vmRun()
-			this.render()
+			this.run()
 		}
 		vm.vStackPop()
 	}

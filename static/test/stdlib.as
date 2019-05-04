@@ -96,3 +96,16 @@ namespace stdlib
 		array
 		length
 	] from root
+
+extern render '__render'
+extern delay '__delay'
+
+function show o:object frame?:string
+	unset o.hidden
+	if frame
+		set o.frame = frame
+	render o
+
+function hide o:object
+	set o.hidden
+	render o
