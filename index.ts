@@ -136,7 +136,7 @@ class AsEngine {
 	}
 
 	public pushThread(thread: vm_mmid_t, delay: number) {
-		this.vm.$._vm_reference(thread, AsVm.Type.THREAD)
+		this.vm.$._vm_reference_m(thread)
 		this.timers.push({expire: Date.now() + delay, thread})
 	}
 
