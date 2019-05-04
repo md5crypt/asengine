@@ -1,3 +1,6 @@
 [submodule "casvm"]
 	path = casvm
 	url = https://github.com/md5crypt/casvm.git
+[submodule "asrc"]
+	path = asrc
+	url = https://github.com/md5crypt/asrc.git
