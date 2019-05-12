@@ -89,23 +89,29 @@ function print ...
 			set s = {string.from s}
 		stdout s + (i == cnt-1 ? "\n" : " ")
 
-namespace stdlib
-	import [
-		hashmap
-		string
-		array
-		length
-	] from root
+namespace stage
+	extern create '__stage_create'
+	extern remove '__stage_remove'
+	extern update '__stage_update'
+	extern render '__stage_render'
+	extern show '__stage_show'
+	extern hide '__stage_hide'
 
-extern render '__render'
+namespace sprite
+	extern get '__sprite_get'
+	extern top '__sprite_top'
+	extern left '__sprite_left'
+
 extern delay '__delay'
 
-function show o:object frame?:string
+function show o:object name?:string
 	unset o.hidden
-	if frame
-		set o.frame = frame
-	render o
+	if sprite
+		set o.sprite = {_intern name}
+	stage.update "main" o
 
 function hide o:object
 	set o.hidden
-	render o
+	stage.update "main" o
+
+stage.create "main" 0
