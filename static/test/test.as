@@ -1,11 +1,16 @@
 location speech
 	object textarea
-	object avatar
 		in self set
-			sprite = {sprite.get village.cow "default"}
-			display = "absolute"
-			top = {sprite.top {sprite.get self "default"}}
-			left = {sprite.left {sprite.get self "default"}}
+			lorem = {text.measure "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum." self 'default'}
+			text = (self.lorem 0)
+			index = 0
+			fontColor = "red"
+			fontFamily = "Comic Sans MS"
+		on use
+			set self.index = (self.index + 1) % {length self.lorem}
+			set self.text = (self.lorem self.index)
+	object avatar
+		set self.proxyObject = village.cow
 
 character narrator
 
@@ -19,7 +24,7 @@ location village "xoxoxo"
 				unset self.thread
 
 	object mouse
-		on use show self (self.sprite == "alive") ? "dead" : "alive"
+		on use set self.sprite = (self.sprite == "alive") ? "dead" : "alive"
 
 	object sun
 		on use
@@ -31,9 +36,9 @@ location village "xoxoxo"
 
 	function fucking_cow
 		while true
-			show cow "frame1"
+			set cow.sprite = "frame1"
 			delay 500
-			show cow "frame2"
+			set cow.sprite = "frame2"
 			delay 500
 
 stage.render "main" village

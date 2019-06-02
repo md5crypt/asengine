@@ -74,6 +74,14 @@ namespace hashmap
 			set path = {nameof node}+'.'+path
 		return path
 
+namespace stdlib
+	import [
+		hashmap
+		string
+		array
+		length
+	] from root
+
 extern typeof '__typeof'
 extern nameof '__nameof'
 extern length '__length'
@@ -92,10 +100,12 @@ function print ...
 namespace stage
 	extern create '__stage_create'
 	extern remove '__stage_remove'
-	extern update '__stage_update'
 	extern render '__stage_render'
 	extern show '__stage_show'
 	extern hide '__stage_hide'
+
+namespace text
+	extern measure '__text_measure'
 
 namespace sprite
 	extern get '__sprite_get'
@@ -103,15 +113,5 @@ namespace sprite
 	extern left '__sprite_left'
 
 extern delay '__delay'
-
-function show o:object name?:string
-	unset o.hidden
-	if sprite
-		set o.sprite = {_intern name}
-	stage.update "main" o
-
-function hide o:object
-	set o.hidden
-	stage.update "main" o
 
 stage.create "main" 0

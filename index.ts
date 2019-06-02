@@ -1,9 +1,23 @@
-import { AsVm, vm_mmid_t, vm_variable_t, vm_hashmap_t, vm_thread_t } from "./casvm/emscripten/asvm"
-import { ResourceFile, ResourceFrame, ResourceGroup } from "./asrc/ResourceFile"
+import { AsVm, vm_mmid_t, vm_variable_t, vm_hashmap_t, vm_thread_t, vm_array_t } from "./casvm/emscripten/asvm"
+import { ResourceFile, ResourceFrame, ResourceGroup, ResourceImageType } from "./asrc/ResourceFile"
 
 interface ThreadTimer {
 	expire: number
 	thread: vm_mmid_t
+}
+
+class ArrayContainer extends PIXI.Container {
+	protected _boundsID!: number
+	public setChildAt(child: PIXI.DisplayObject, index: number) {
+		(this.children[index] as any).parent = null
+		if (child.parent) {
+			child.parent.removeChild(child)
+		}
+		this.children[index] = child;
+		(child as any).parent = this;
+		(child.transform as any)._parentID = -1
+		this._boundsID++
+	}
 }
 
 class HitmapRectangle extends PIXI.Rectangle {
@@ -64,7 +78,7 @@ class AsEngine {
 		if (this.stage.has(mmid)) {
 			return false
 		}
-		const container = new PIXI.Container()
+		const container = new ArrayContainer()
 		container.interactive = true
 		container.zIndex = zindex
 		container.visible = false
@@ -72,10 +86,8 @@ class AsEngine {
 			container,
 			location: null,
 			name: mmid,
-			updateSet: new Set(),
 			hidden: true,
-			render: false,
-			updateMainFrame: false
+			render: false
 		})
 		this.app.stage.addChild(container)
 		this.app.stage.sortChildren()
@@ -168,7 +180,10 @@ class AsEngine {
 			const imageData: AsEngine.ImageData = {
 				height: image.height,
 				width: image.width,
-				texture: image.placeholder ? PIXI.Texture.EMPTY : PIXI.Texture.from(`/images/${image.hash}.png`)
+				type: image.type
+			}
+			if (image.type == ResourceImageType.FRAME) {
+				imageData.texture = PIXI.Texture.from(`/images/${image.hash}.png`)
 			}
 			if (image.hitmap) {
 				const data = atob(image.hitmap)
@@ -221,130 +236,124 @@ class AsEngine {
 		}
 	}
 
+	public static readonly baseObjectProps: AsVm.HashmapKeyList = [
+		['hidden', AsVm.Type.BOOLEAN],
+		['disabled', AsVm.Type.BOOLEAN],
+		['top', AsVm.Type.INTEGER],
+		['left', AsVm.Type.INTEGER],
+		['sprite', AsVm.Type.STRING]
+	]
+
+	public static readonly proxyObjectProps: AsVm.HashmapKeyList = [
+		['proxyObject', AsVm.Type.HASHMAP],
+		['proxySprite', AsVm.Type.STRING]
+	]
+
+	public static readonly textObjectProps: AsVm.HashmapKeyList = [
+		['text', AsVm.Type.STRING],
+		['fontSize', AsVm.Type.STRING],
+		['fontFamily', AsVm.Type.STRING],
+		['fontColor', AsVm.Type.STRING]
+	]
+
+	public static readonly fontOptionsList = [
+		['fontSize', 'fontSize'],
+		['fontFamily', 'fontFamily'],
+		['fontColor', 'fill'],
+	]
+
+	private createSprite(frame: AsEngine.FrameData, object: AsEngine.ObjectData): PIXI.Sprite | null {
+		const vm = this.vm
+		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
+		let sprite: PIXI.Sprite | null = null
+		switch (frame.image.type) {
+			case ResourceImageType.FRAME:
+				sprite = new PIXI.Sprite(frame.image.texture!)
+				sprite.hitArea = new HitmapRectangle(frame.image)
+				break
+			case ResourceImageType.PROXY: {
+				const exProps = vm.readHashmapKeys(hashmap, AsEngine.proxyObjectProps) as AsEngine.ProxyObjectProps
+				const proxyObject = exProps.proxyObject ? this.objectMap.get(exProps.proxyObject) : object
+				if (!proxyObject) {
+					console.error(`invalid proxyObject value '${exProps.proxyObject}' in '${vm.getHashmapPath(object.mmid)}'`)
+					break
+				}
+				const proxyName = exProps.proxySprite || vm.intern('default')
+				const proxyFrame = proxyObject.frameMap.get(proxyName)
+				if (!proxyFrame) {
+					console.error(`sprite '${vm.readVmString(proxyName)}' not found in object '${vm.getHashmapPath(proxyObject.mmid)}'`, proxyObject.frameMap, vm.intern('default'))
+					break
+				}
+				sprite = this.createSprite(proxyFrame, proxyObject)
+				break
+			} case ResourceImageType.TEXT: {
+				const exProps = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
+				const style: {[key: string]: any} = {}
+				for (const [prop, key] of AsEngine.fontOptionsList) {
+					if ((exProps as any)[prop]) {
+						style[key] = vm.readVmString((exProps as any)[prop] as vm_mmid_t)
+					}
+				}
+				sprite = new PIXI.Text(exProps.text ? vm.readVmString(exProps.text) : 'no text', style)
+				sprite.hitArea = new PIXI.Rectangle(0, 0, frame.image.width, frame.image.height)
+				break
+			} default:
+				console.error(frame)
+				throw new Error("unknown frame type")
+		}
+		return sprite
+	}
+
+	private drawObject(object: AsEngine.ObjectData, stage: AsEngine.StageData) {
+		const vm = this.vm
+		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
+		if (!stage.render && !vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4]) {
+			// object did not change
+			return
+		}
+		console.log(`drawing '${vm.getHashmapPath(object.mmid)}'`)
+		const props = this.vm.readHashmapKeys(hashmap, AsEngine.baseObjectProps) as AsEngine.BaseObjectProps
+		const name = props.sprite || this.vm.intern('default')
+		const frame = object.frameMap.get(name)
+		if (!frame) {
+			console.log(`sprite '${vm.readVmString(name)}' not found in object '${vm.getHashmapPath(object.mmid)}'`)
+		} else {
+			const index = (stage.location == object) ? 0 : (object.zindex + 1)
+			let sprite = this.createSprite(frame, object)
+			if (!sprite) {
+				sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
+				sprite.visible = false
+			} else {
+				sprite.visible = !props.hidden
+				sprite.interactive = !props.disabled
+				sprite.x = frame.left + (props.left || 0)
+				sprite.y = frame.top + (props.top || 0)
+				sprite.on('pointertap', () => this.executeEvent('use', object.mmid))
+			}
+			stage.container.setChildAt(sprite, index)
+		}
+		vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4] = 0
+	}
+
 	private renderStage(stage: AsEngine.StageData) {
 		if (!stage.location) {
 			throw new Error("no location set")
 		}
-		const location = stage.location
 
 		if (stage.render) {
-			stage.updateSet.clear()
 			stage.container.removeChildren()
-			stage.container.addChild(new PIXI.Sprite(PIXI.Texture.EMPTY))
-			for (const object of stage.location.objectMap!.values()) {
+			for (let i = 0; i < stage.location.objectMap!.size + 1; i++) {
 				const sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
 				sprite.visible = false
-				sprite.interactive = true
-				sprite.on('pointertap', () => this.executeEvent('use', object.mmid))
 				stage.container.addChild(sprite)
-				stage.updateSet.add(object)
-			}
-			stage.render = false
-			stage.updateMainFrame = true
-		}
-
-		const vm = this.vm
-		const heap = vm.$u32
-
-		const frameKey = vm.intern("sprite")
-		const defaultKey = vm.intern("default")
-		const vmVariable = vm.vStackPush(vm_variable_t.__sizeof) as vm_variable_t
-
-		if (stage.updateMainFrame) {
-			const locationPtr = vm.$._vm_memory_get_ptr(location.mmid) as vm_hashmap_t
-			vm.$._vm_hashmap_get(locationPtr, frameKey, vmVariable)
-			const type = heap[(vmVariable + vm_variable_t.type) / 4]
-			const value = heap[(vmVariable + vm_variable_t.data) / 4]
-			let frame: AsEngine.FrameData | undefined
-			if (type == AsVm.Type.SPRITE) {
-				frame = this.frameMap.get(value)
-			} else if (type == AsVm.Type.STRING) {
-				frame = location.frameMap.get(value)
-			} else {
-				frame = location.frameMap.get(defaultKey)
-			}
-			if (!frame) {
-				console.log(
-					(type == AsVm.Type.SPRITE) ?
-					'invalid sprite referance' :
-					`sprite '${vm.readVmString(value)}' not found in location '${vm.getHashmapPath(location.mmid)}'`
-				)
-			} else {
-				const sprite = stage.container.getChildAt(0) as PIXI.Sprite // tslint:disable-line
-				sprite.texture = frame.image.texture
-				sprite.x = frame.left
-				sprite.y = frame.top
-			}
-			stage.updateMainFrame = false
-		}
-
-		const hiddenKey = vm.intern("hidden")
-		const disabledKey = vm.intern("disabled")
-		const displayKey = vm.intern("display")
-		const displayModeRelative = vm.intern("relative")
-		const displayModeAbsolute = vm.intern("absolute")
-		const topKey = vm.intern("top")
-		const leftKey = vm.intern("left")
-
-
-		for (const object of stage.updateSet) {
-			const sprite = stage.container.getChildAt(object.zindex + 1) as PIXI.Sprite // tslint:disable-line
-			const objectPtr = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
-			vm.$._vm_hashmap_get(objectPtr, hiddenKey, vmVariable)
-			if (heap[(vmVariable + vm_variable_t.data) / 4]) {
-				sprite.visible = false
-			} else {
-				sprite.visible = true
-				vm.$._vm_hashmap_get(objectPtr, frameKey, vmVariable)
-				const type = heap[(vmVariable + vm_variable_t.type) / 4]
-				const value = heap[(vmVariable + vm_variable_t.data) / 4]
-				let frame: AsEngine.FrameData | undefined
-				if (type == AsVm.Type.SPRITE) {
-					frame = this.frameMap.get(value)
-				} else if (type == AsVm.Type.STRING) {
-					frame = object.frameMap.get(value)
-				} else {
-					frame = object.frameMap.get(defaultKey)
-				}
-				if (!frame) {
-					console.log(
-						(type == AsVm.Type.SPRITE) ?
-						'invalid sprite referance' :
-						`sprite '${vm.readVmString(value)}' not found in object '${vm.getHashmapPath(location.mmid)}'`
-					)
-				} else {
-					if (sprite.texture != frame.image.texture) {
-						sprite.texture = frame.image.texture
-						sprite.hitArea = new HitmapRectangle(frame.image)
-					}
-					vm.$._vm_hashmap_get(objectPtr, displayKey, vmVariable)
-					if (heap[(vmVariable + vm_variable_t.type) / 4] == AsVm.Type.STRING) {
-						const mmid = heap[(vmVariable + vm_variable_t.data) / 4] as vm_mmid_t
-						vm.$._vm_hashmap_get(objectPtr, leftKey, vmVariable)
-						const left = heap[(vmVariable + vm_variable_t.data) / 4]
-						vm.$._vm_hashmap_get(objectPtr, topKey, vmVariable)
-						const top = heap[(vmVariable + vm_variable_t.data) / 4]
-						console.log(vm.readVmString(mmid),left,top)
-						if (mmid == displayModeRelative) {
-							sprite.x = left + frame.left
-							sprite.y = top + frame.top
-						} else if (mmid == displayModeAbsolute) {
-							sprite.x = left
-							sprite.y = top
-						} else {
-							console.error("unknown display mode: " + vm.readVmString(mmid))
-						}
-					} else {
-						sprite.x = frame.left
-						sprite.y = frame.top
-					}
-					vm.$._vm_hashmap_get(objectPtr, disabledKey, vmVariable)
-					sprite.interactive = (heap[(vmVariable + vm_variable_t.data) / 4] == 0)
-				}
 			}
 		}
-		vm.vStackPop()
-		stage.updateSet.clear()
+
+		this.drawObject(stage.location, stage)
+		for (const object of stage.location.objectMap!.values()) {
+			this.drawObject(object, stage)
+		}
+		stage.render = false
 		stage.container.visible = true
 	}
 
@@ -390,18 +399,37 @@ namespace AsEngine {
 	export interface ImageData {
 		width: number
 		height: number
-		texture: PIXI.Texture
+		type: ResourceImageType
+		texture?: PIXI.Texture
 		hitmap?: Uint8Array
 	}
 
 	export interface StageData {
 		name: vm_mmid_t
-		updateSet: Set<AsEngine.ObjectData>
 		location: AsEngine.ObjectData | null
 		hidden: boolean
 		render: boolean
-		updateMainFrame: boolean
-		container: PIXI.Container
+		container: ArrayContainer
+	}
+
+	export interface BaseObjectProps {
+		hidden?: boolean
+		disabled?: boolean
+		top?: number
+		left?: number
+		sprite?: vm_mmid_t
+	}
+
+	export interface ProxyObjectProps extends BaseObjectProps {
+		proxyObject?: vm_mmid_t
+		proxySprite?: vm_mmid_t
+	}
+
+	export interface TextObjectProps extends BaseObjectProps {
+		text: vm_mmid_t
+		fontSize?: vm_mmid_t
+		fontColor?: vm_mmid_t
+		fontFamily?: vm_mmid_t
 	}
 }
 
@@ -447,6 +475,49 @@ window.addEventListener('load', async () => {
 		}
 		engine.pushThread(vm.$._vm_get_current_thread(), vm.getArgValue(top, 1, true))
 		return AsVm.Exception.YIELD
+	})
+
+	vm.addFunction('__text_measure', (top, argc) => {
+		const exception = checkArgs(top, argc, 3, AsVm.Type.STRING, AsVm.Type.HASHMAP, AsVm.Type.STRING)
+		if (exception != AsVm.Exception.NONE) {
+			return exception
+		}
+		const object = engine.objectMap.get(vm.getArgValue(top, 2) as vm_mmid_t)
+		if (!object) {
+			vm.setReturnValue(top, vm.createVmString("object has no resources"), AsVm.Type.STRING)
+			return AsVm.Exception.USER
+		}
+		const frame = object.frameMap.get(vm.getArgValue(top, 3) as vm_mmid_t)
+		if (!frame) {
+			vm.setReturnValue(top, vm.createVmString("sprite not found"), AsVm.Type.STRING)
+			return AsVm.Exception.USER
+		}
+		const text = vm.readVmString(vm.getArgValue(top, 1) as vm_mmid_t)
+		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
+		const props = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
+		const style: {[key: string]: any} = { wordWrap: true, wordWrapWidth: frame.image.width }
+		for (const [prop, key] of AsEngine.fontOptionsList) {
+			if ((props as any)[prop]) {
+				style[key] = vm.readVmString((props as any)[prop] as vm_mmid_t)
+			}
+		}
+		const result = PIXI.TextMetrics.measureText(text, new PIXI.TextStyle(style))
+		const linesPerFrame = Math.floor(frame.image.height / result.lineHeight)
+		const blocks: string[] = []
+		while (result.lines.length > linesPerFrame) {
+			blocks.push(result.lines.splice(0, linesPerFrame).join('\n'))
+		}
+		if (result.lines.length > 0) {
+			blocks.push(result.lines.join('\n'))
+		}
+		const output = blocks.map(x => vm.createVmString(x))
+		const array = vm.$._vm_array_create(output.length)
+		const arrayPtr = vm.$._vm_memory_get_ptr(array) as vm_array_t
+		for (let i = 0; i < output.length; i++) {
+			vm.$._vm_array_set(arrayPtr, i, output[i], AsVm.Type.STRING)
+		}
+		vm.setReturnValue(top, array, AsVm.Type.ARRAY)
+		return AsVm.Exception.NONE
 	})
 
 	vm.addFunction('__sprite_get', (top, argc) => {
@@ -569,52 +640,11 @@ window.addEventListener('load', async () => {
 			} else {
 				stageData.location = locationData
 				stageData.render = true
-				stageData.updateSet.clear()
 				return AsVm.Exception.NONE
 			}
 		} else {
 			vm.setReturnValue(top, vm.createVmString(`stage '${vm.readVmString(name)}' does not exist`), AsVm.Type.STRING)
 			return AsVm.Exception.USER
-		}
-	})
-
-	vm.addFunction('__stage_update', (top, argc) => {
-		let object: vm_mmid_t
-		if (argc == 2) {
-			const exception = checkArgs(top, argc, 2, AsVm.Type.STRING, AsVm.Type.OBJECT)
-			if (exception != AsVm.Exception.NONE) {
-				return exception
-			}
-			object = vm.getArgValue(top, 2) as vm_mmid_t
-		} else {
-			const exception = checkArgs(top, argc, 1, AsVm.Type.STRING)
-			if (exception != AsVm.Exception.NONE) {
-				return exception
-			}
-			object = 0
-		}
-		const stage = vm.getArgValue(top, 1) as vm_mmid_t
-		const stageData = engine.stage.get(stage)
-		if (!stageData) {
-			vm.setReturnValue(top, vm.createVmString(`stage '${vm.readVmString(stage)}' does not exist`), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		} else if (!stageData.location) {
-			vm.setReturnValue(top, vm.createVmString(`stage '${vm.readVmString(stage)}' has no location set`), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		} else if (object) {
-			const objectData = stageData.location.objectMap!.get(object)
-			if (!objectData) {
-				vm.setReturnValue(top, vm.createVmString(
-					`object '${vm.getHashmapPath(object)}' not found in '${vm.getHashmapPath(stageData.location.mmid)}' or has no resource info`),
-					AsVm.Type.STRING
-				)
-				return AsVm.Exception.USER
-			}
-			stageData.updateSet.add(objectData)
-			return AsVm.Exception.NONE
-		} else {
-			stageData.updateMainFrame = true
-			return AsVm.Exception.NONE
 		}
 	})
 
