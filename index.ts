@@ -55,7 +55,8 @@ class AsEngine {
 	public readonly frameMap: Map<number, AsEngine.FrameData>
 	public readonly imageMap: Map<string, AsEngine.ImageData>
 	public readonly app: PIXI.Application
-	public readonly stage: Map<vm_mmid_t, AsEngine.StageData>
+	private stage: AsEngine.StageData[]
+	private dispatcher: vm_mmid_t
 	private timers: ThreadTimer[]
 	private runTimeout: NodeJS.Timeout | null
 	private busy: boolean
@@ -68,40 +69,39 @@ class AsEngine {
 		this.runTimeout = null
 		this.busy = false
 		this.dirty = false
-		this.stage = new Map()
 		this.imageMap = new Map()
 		this.objectMap = new Map()
 		this.frameMap = new Map()
+		this.dispatcher = 0
+		this.stage = []
 	}
 
-	public createStage(mmid: vm_mmid_t, zindex: number) {
-		if (this.stage.has(mmid)) {
-			return false
-		}
-		const container = new ArrayContainer()
-		container.interactive = true
-		container.zIndex = zindex
-		container.visible = false
-		this.stage.set(mmid, {
-			container,
-			location: null,
-			name: mmid,
-			hidden: true,
-			render: false
-		})
-		this.app.stage.addChild(container)
-		this.app.stage.sortChildren()
-		return true
+	public init(image: ArrayBuffer, resources: ResourceFile) {
+		this.vm.vmInit(new Uint8Array(image))
+		this.loadResources(resources)
 	}
 
-	public removeStage(mmid: vm_mmid_t) {
-		const stageData = this.stage.get(mmid)
-		if (!stageData) {
-			return false
+	private readStageData() {
+		const vm = this.vm
+		const stage = vm.resolve('__system.stage')
+		if (!stage || (stage.type != AsVm.Type.ARRAY)) {
+			throw new Error("__system_stage missing or invalid")
 		}
-		this.app.stage.removeChild(stageData.container)
-		this.stage.delete(mmid)
-		return true
+		const stageArray = vm.readArray(vm.$._vm_memory_get_ptr(stage.value as vm_mmid_t) as vm_array_t)
+		for (const variable of stageArray) {
+			if (!AsVm.isType(variable.type, AsVm.Type.HASHMAP)) {
+				throw new Error("invalid value in __system_stage")
+			}
+			const container = new ArrayContainer()
+			container.visible = false
+			this.app.stage.addChild(container)
+			this.stage.push({
+				mmid: variable.value as vm_mmid_t,
+				render: true,
+				location: null,
+				container
+			})
+		}
 	}
 
 	public run() {
@@ -221,7 +221,7 @@ class AsEngine {
 		return object
 	}
 
-	public loadResources(resourceFile: ResourceFile) {
+	private loadResources(resourceFile: ResourceFile) {
 		this.loadResourceImages(resourceFile)
 		for (let i = 0; i < resourceFile.groups.length; i++) {
 			this.loadResourceGroup(resourceFile.groups[i], i)
@@ -229,8 +229,38 @@ class AsEngine {
 	}
 
 	private render() {
-		for (const stageData of this.stage.values()) {
-			if (!stageData.hidden) {
+		const vm = this.vm
+		if (!this.dispatcher) {
+			this.readStageData()
+			const dispatch = this.vm.resolve('__system.dispatch')
+			if (!dispatch || (dispatch.type != AsVm.Type.FUNCTION)) {
+				throw new Error("click dispatcher not found")
+			}
+			this.dispatcher = dispatch.value as vm_mmid_t
+		}
+		for (const stageData of this.stage) {
+			const hashmap = vm.$._vm_memory_get_ptr(stageData.mmid) as vm_hashmap_t
+			if (vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4]) {
+				vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4] = 0
+				const props = vm.readHashmapKeys(hashmap, AsEngine.stageProps) as AsEngine.StageProps
+				stageData.container.visible = !props.hidden
+				if (!props.location) {
+					stageData.location = null
+				} else {
+					const data = this.objectMap.get(props.location)
+					if (!data) {
+						throw new Error(`'${vm.getHashmapPath(props.location)}' has no resource information`)
+					} else if (data.type != AsVm.Type.LOCATION) {
+						throw new Error(`'${vm.getHashmapPath(props.location)}' is not a location`)
+					} else {
+						if (stageData.location != data) {
+							stageData.render = true
+						}
+						stageData.location = data
+					}
+				}
+			}
+			if (stageData.container.visible) {
 				this.renderStage(stageData)
 			}
 		}
@@ -254,6 +284,11 @@ class AsEngine {
 		['fontSize', AsVm.Type.STRING],
 		['fontFamily', AsVm.Type.STRING],
 		['fontColor', AsVm.Type.STRING]
+	]
+
+	public static readonly stageProps: AsVm.HashmapKeyList = [
+		['location', AsVm.Type.LOCATION],
+		['hidden', AsVm.Type.BOOLEAN]
 	]
 
 	public static readonly fontOptionsList = [
@@ -328,7 +363,7 @@ class AsEngine {
 				sprite.interactive = !props.disabled
 				sprite.x = frame.left + (props.left || 0)
 				sprite.y = frame.top + (props.top || 0)
-				sprite.on('pointertap', () => this.executeEvent('use', object.mmid))
+				sprite.on('pointertap', () => (this.vm.vmCall(this.dispatcher, {type: AsVm.Type.OBJECT, value: object.mmid}), this.run()))
 			}
 			stage.container.setChildAt(sprite, index)
 		}
@@ -355,20 +390,6 @@ class AsEngine {
 		}
 		stage.render = false
 		stage.container.visible = true
-	}
-
-	private executeEvent(event: string, object: vm_mmid_t) {
-		const vm = this.vm
-		const heap = vm.$u32
-		const key = vm.intern('__on_' + event)
-		const hashmap = vm.$._vm_memory_get_ptr(object) as vm_hashmap_t
-		const vmVariable = vm.vStackPush(vm_variable_t.__sizeof) as vm_variable_t
-		vm.$._vm_hashmap_get(hashmap, key, vmVariable)
-		if (AsVm.isType(heap[(vmVariable + vm_variable_t.type) / 4], AsVm.Type.CALLABLE)) {
-			vm.vmCall(heap[(vmVariable + vm_variable_t.data) / 4])
-			this.run()
-		}
-		vm.vStackPop()
 	}
 
 	public getFrame(object: vm_mmid_t, name: vm_mmid_t) {
@@ -405,9 +426,8 @@ namespace AsEngine {
 	}
 
 	export interface StageData {
-		name: vm_mmid_t
+		mmid: vm_mmid_t
 		location: AsEngine.ObjectData | null
-		hidden: boolean
 		render: boolean
 		container: ArrayContainer
 	}
@@ -430,6 +450,11 @@ namespace AsEngine {
 		fontSize?: vm_mmid_t
 		fontColor?: vm_mmid_t
 		fontFamily?: vm_mmid_t
+	}
+
+	export interface StageProps {
+		location?: vm_mmid_t
+		hidden?: boolean
 	}
 }
 
@@ -502,6 +527,7 @@ window.addEventListener('load', async () => {
 			}
 		}
 		const result = PIXI.TextMetrics.measureText(text, new PIXI.TextStyle(style))
+		console.log(result, frame.image, style)
 		const linesPerFrame = Math.floor(frame.image.height / result.lineHeight)
 		const blocks: string[] = []
 		while (result.lines.length > linesPerFrame) {
@@ -520,135 +546,6 @@ window.addEventListener('load', async () => {
 		return AsVm.Exception.NONE
 	})
 
-	vm.addFunction('__sprite_get', (top, argc) => {
-		const exception = checkArgs(top, argc, 2, AsVm.Type.HASHMAP, AsVm.Type.STRING)
-		if (exception != AsVm.Exception.NONE) {
-			return exception
-		}
-		const frame = engine.getFrame(vm.getArgValue(top, 1) as vm_mmid_t, vm.getArgValue(top, 2) as vm_mmid_t)
-		if (!frame) {
-			vm.setReturnValue(top, vm.createVmString("sprite not found"), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		}
-		vm.setReturnValue(top, frame.id, AsVm.Type.SPRITE)
-		return AsVm.Exception.NONE
-	})
-
-	vm.addFunction('__sprite_top', (top, argc) => {
-		const exception = checkArgs(top, argc, 1, AsVm.Type.SPRITE)
-		if (exception != AsVm.Exception.NONE) {
-			return exception
-		}
-		const frame = engine.frameMap.get(vm.getArgValue(top, 1))
-		if (!frame) {
-			vm.setReturnValue(top, vm.createVmString("invalid spirte referance"), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		}
-		vm.setReturnValue(top, frame.top, AsVm.Type.INTEGER)
-		return AsVm.Exception.NONE
-	})
-
-	vm.addFunction('__sprite_left', (top, argc) => {
-		const exception = checkArgs(top, argc, 1, AsVm.Type.SPRITE)
-		if (exception != AsVm.Exception.NONE) {
-			return exception
-		}
-		const frame = engine.frameMap.get(vm.getArgValue(top, 1))
-		if (!frame) {
-			vm.setReturnValue(top, vm.createVmString("invalid spirte referance"), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		}
-		vm.setReturnValue(top, frame.left, AsVm.Type.INTEGER)
-		return AsVm.Exception.NONE
-	})
-
-	vm.addFunction('__stage_create', (top, argc) => {
-		const exception = checkArgs(top, argc, 2, AsVm.Type.STRING, AsVm.Type.INTEGER)
-		if (exception != AsVm.Exception.NONE) {
-			return exception
-		}
-		const name = vm.getArgValue(top, 1) as vm_mmid_t
-		if (!engine.createStage(name, vm.getArgValue(top, 2))) {
-			vm.setReturnValue(top, vm.createVmString(`failed to create stage '${vm.readVmString(name)}'; stage already exists`), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		}
-		return AsVm.Exception.NONE
-	})
-
-	vm.addFunction('__stage_remove', (top, argc) => {
-		const exception = checkArgs(top, argc, 1, AsVm.Type.STRING)
-		if (exception != AsVm.Exception.NONE) {
-			return exception
-		}
-		const name = vm.getArgValue(top, 1) as vm_mmid_t
-		if (!engine.removeStage(name)) {
-			vm.setReturnValue(top, vm.createVmString(`stage '${vm.readVmString(name)}' does not exist`), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		}
-		return AsVm.Exception.NONE
-	})
-
-	vm.addFunction('__stage_hide', (top, argc) => {
-		const exception = checkArgs(top, argc, 1, AsVm.Type.STRING)
-		if (exception != AsVm.Exception.NONE) {
-			return exception
-		}
-		const name = vm.getArgValue(top, 1) as vm_mmid_t
-		const stageData = engine.stage.get(name)
-		if (stageData) {
-			stageData.hidden = true
-			stageData.container.visible = false
-			return AsVm.Exception.NONE
-		} else {
-			vm.setReturnValue(top, vm.createVmString(`stage '${vm.readVmString(name)}' does not exist`), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		}
-	})
-
-	vm.addFunction('__stage_show', (top, argc) => {
-		const exception = checkArgs(top, argc, 1, AsVm.Type.STRING)
-		if (exception != AsVm.Exception.NONE) {
-			return exception
-		}
-		const name = vm.getArgValue(top, 1) as vm_mmid_t
-		const stageData = engine.stage.get(name)
-		if (stageData) {
-			stageData.hidden = false
-			return AsVm.Exception.NONE
-		} else {
-			vm.setReturnValue(top, vm.createVmString(`stage '${vm.readVmString(name)}' does not exist`), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		}
-	})
-
-	vm.addFunction('__stage_render', (top, argc) => {
-		const exception = checkArgs(top, argc, 2, AsVm.Type.STRING, AsVm.Type.LOCATION)
-		if (exception != AsVm.Exception.NONE) {
-			return exception
-		}
-		const name = vm.getArgValue(top, 1) as vm_mmid_t
-		const stageData = engine.stage.get(name)
-		if (stageData) {
-			const location = vm.getArgValue(top, 2) as vm_mmid_t
-			const locationData = engine.objectMap.get(location)
-			if (!locationData) {
-				vm.setReturnValue(top, vm.createVmString(`'${vm.getHashmapPath(location)}' has no resource information`), AsVm.Type.STRING)
-				return AsVm.Exception.USER
-			} else if (locationData.type != AsVm.Type.LOCATION) {
-				vm.setReturnValue(top, vm.createVmString(`'${vm.getHashmapPath(location)}' is not a location`), AsVm.Type.STRING)
-				return AsVm.Exception.USER
-			} else {
-				stageData.location = locationData
-				stageData.render = true
-				return AsVm.Exception.NONE
-			}
-		} else {
-			vm.setReturnValue(top, vm.createVmString(`stage '${vm.readVmString(name)}' does not exist`), AsVm.Type.STRING)
-			return AsVm.Exception.USER
-		}
-	})
-
-	vm.vmInit(new Uint8Array(files[1].data as ArrayBuffer))
-	engine.loadResources(files[2].data as ResourceFile)
+	engine.init(files[1].data as ArrayBuffer, files[2].data as ResourceFile)
 	engine.run()
 })

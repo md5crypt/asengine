@@ -97,21 +97,19 @@ function print ...
 			set s = {string.from s}
 		stdout s + (i == cnt-1 ? "\n" : " ")
 
-namespace stage
-	extern create '__stage_create'
-	extern remove '__stage_remove'
-	extern render '__stage_render'
-	extern show '__stage_show'
-	extern hide '__stage_hide'
-
 namespace text
 	extern measure '__text_measure'
 
-namespace sprite
-	extern get '__sprite_get'
-	extern top '__sprite_top'
-	extern left '__sprite_left'
-
 extern delay '__delay'
 
-stage.create "main" 0
+namespace stage
+	namespace main
+		set self.hidden = true
+	namespace ui
+		set self.hidden = true
+
+namespace __system
+	function dispatch target:object
+		if !target.disabled && target.__on_use
+			target.__on_use
+	set self.stage = [stage.main stage.ui]
