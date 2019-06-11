@@ -74,6 +74,11 @@ namespace hashmap
 			set path = {nameof node}+'.'+path
 		return path
 
+namespace thread
+	extern current '__threadCurrent'
+	extern resume '__threadResume'
+	extern detach '__threadDetach'
+
 namespace stdlib
 	import [
 		hashmap
@@ -98,7 +103,7 @@ function print ...
 		stdout s + (i == cnt-1 ? "\n" : " ")
 
 namespace text
-	extern measure '__text_measure'
+	extern measure '__textMeasure'
 
 extern delay '__delay'
 
@@ -110,6 +115,9 @@ namespace stage
 
 namespace __system
 	function dispatch target:object
-		if !target.disabled && target.__on_use
-			target.__on_use
+		print target
+		if !target.disabled
+			local func = target.__on_use
+			if func func
+
 	set self.stage = [stage.main stage.ui]

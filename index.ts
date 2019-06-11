@@ -14,9 +14,25 @@ class ArrayContainer extends PIXI.Container {
 			child.parent.removeChild(child)
 		}
 		this.children[index] = child;
-		(child as any).parent = this;
-		(child.transform as any)._parentID = -1
+		(child as any).parent = this
+		child.updateTransform()
 		this._boundsID++
+	}
+
+	public hitTest(point: PIXI.Point) {
+		if (this.visible && this.interactive) {
+			const transformed = new PIXI.Point()
+			for (let i = this.children.length - 1; i > 0; i--) {
+				const sprite = this.children[i]
+				if (sprite.visible && sprite.interactive) {
+					sprite.worldTransform.applyInverse(point, transformed)
+					if (sprite.hitArea.contains(transformed.x, transformed.y)) {
+						return i
+					}
+				}
+			}
+		}
+		return 0
 	}
 }
 
@@ -74,6 +90,30 @@ class AsEngine {
 		this.frameMap = new Map()
 		this.dispatcher = 0
 		this.stage = []
+		this.app.stage.interactiveChildren = false
+		this.app.stage.interactive = true
+		this.app.stage.hitArea = this.app.screen
+		this.app.stage.on('pointertap', (e: PIXI.interaction.InteractionEvent) => {
+			const point = e.data.global
+			for (let i = this.stage.length - 1; i >= 0; i--) {
+				const result = this.stage[i].container.hitTest(point)
+				if(result) {
+					let mmid: vm_mmid_t = 0
+					for (const object of this.stage[i].location!.objectMap!.values()) {
+						if (object.zindex == (result - 1)) {
+							mmid = object.mmid
+							break
+						}
+					}
+					if (!mmid) {
+						throw new Error("wtf?")
+					}
+					this.vm.vmCall(this.dispatcher, {type: AsVm.Type.OBJECT, value: mmid})
+					this.run()
+					break
+				}
+			}
+		})
 	}
 
 	public init(image: ArrayBuffer, resources: ResourceFile) {
@@ -244,6 +284,7 @@ class AsEngine {
 				vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4] = 0
 				const props = vm.readHashmapKeys(hashmap, AsEngine.stageProps) as AsEngine.StageProps
 				stageData.container.visible = !props.hidden
+				stageData.container.interactive = !props.disabled
 				if (!props.location) {
 					stageData.location = null
 				} else {
@@ -288,7 +329,8 @@ class AsEngine {
 
 	public static readonly stageProps: AsVm.HashmapKeyList = [
 		['location', AsVm.Type.LOCATION],
-		['hidden', AsVm.Type.BOOLEAN]
+		['hidden', AsVm.Type.BOOLEAN],
+		['disabled', AsVm.Type.BOOLEAN]
 	]
 
 	public static readonly fontOptionsList = [
@@ -363,7 +405,6 @@ class AsEngine {
 				sprite.interactive = !props.disabled
 				sprite.x = frame.left + (props.left || 0)
 				sprite.y = frame.top + (props.top || 0)
-				sprite.on('pointertap', () => (this.vm.vmCall(this.dispatcher, {type: AsVm.Type.OBJECT, value: object.mmid}), this.run()))
 			}
 			stage.container.setChildAt(sprite, index)
 		}
@@ -455,6 +496,7 @@ namespace AsEngine {
 	export interface StageProps {
 		location?: vm_mmid_t
 		hidden?: boolean
+		disabled?: boolean
 	}
 }
 
@@ -502,7 +544,7 @@ window.addEventListener('load', async () => {
 		return AsVm.Exception.YIELD
 	})
 
-	vm.addFunction('__text_measure', (top, argc) => {
+	vm.addFunction('__textMeasure', (top, argc) => {
 		const exception = checkArgs(top, argc, 3, AsVm.Type.STRING, AsVm.Type.HASHMAP, AsVm.Type.STRING)
 		if (exception != AsVm.Exception.NONE) {
 			return exception

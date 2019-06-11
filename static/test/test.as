@@ -3,12 +3,17 @@ location speech
 		in self set
 			fontColor = "red"
 			fontFamily = "Comic Sans MS"
-			lorem = {text.measure "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum." self 'default'}
-			text = (self.lorem 0)
-			index = 0
+			fontSize = "32px"
 		on use
-			set self.index = (self.index + 1) % {length self.lorem}
-			set self.text = (self.lorem self.index)
+			if {length self.buffer}
+				set self.text = {array.pop self.buffer}
+			else
+				set stage.main.disabled = false
+				set stage.ui.hidden = true
+				thread.resume self.thread
+				unset self.buffer
+				unset self.text
+
 	object avatar
 		set self.proxyObject = village.cow
 
@@ -24,19 +29,35 @@ location village "xoxoxo"
 				unset self.thread
 
 	object mouse
-		on use set self.sprite = (self.sprite == "alive") ? "dead" : "alive"
+		on use
+			set self.sprite = (self.sprite == "alive") ? "dead" : "alive"
+			local a = {array.create 6}
+			memstat a
+			print a
 
 	object sun
 		on use
-			set stage.ui.hidden = !stage.ui.hidden
+			say "hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world."
+			say "bl abla"
 
 	function fucking_cow
 		while true
 			set cow.sprite = "frame1"
-			delay 500
+			delay 50
 			set cow.sprite = "frame2"
-			delay 500
+			delay 50
 
 set stage.main.location = village
 set stage.ui.location = speech
 set stage.main.hidden = false
+
+function say text:string
+	local lines = {.text.measure text speech.textarea 'default'}
+	in speech.textarea set
+		buffer = lines
+		text = {array.pop lines}
+		thread = {thread.current}
+	set stage.main.disabled = true
+	set stage.ui.hidden = false
+	_yield
+	unset speech.textarea.thread
