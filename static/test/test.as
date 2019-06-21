@@ -1,22 +1,3 @@
-location speech
-	object textarea
-		in self set
-			fontColor = "red"
-			fontFamily = "Comic Sans MS"
-			fontSize = "32px"
-		on use
-			if {length self.buffer}
-				set self.text = {array.pop self.buffer}
-			else
-				set stage.main.disabled = false
-				set stage.ui.hidden = true
-				thread.resume self.thread
-				unset self.buffer
-				unset self.text
-
-	object avatar
-		set self.proxyObject = village.cow
-
 character narrator
 
 location village "xoxoxo"
@@ -37,8 +18,14 @@ location village "xoxoxo"
 
 	object sun
 		on use
-			say "hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world. hello my world."
-			say "bl abla"
+			say narrator "
+				Apparently we had reached a great height in the atmosphere, for the sky
+				was a dead black, and the stars had ceased to twinkle. By the same illusion
+				which lifts the horizon of the sea to the level of the spectator on a hillside,
+				the sable cloud beneath was dished out, and the car seemed to float in the middle
+				of an immense dark sphere, whose upper half was strewn with silver. Looking down
+				into the dark gulf below, I could see a ruddy light streaming through a rift in the clouds."
+			say narrator "oh fuck that" "one"
 
 	function fucking_cow
 		while true
@@ -47,17 +34,38 @@ location village "xoxoxo"
 			set cow.sprite = "frame2"
 			delay 50
 
+dialog test
+	option "test line 1"
+		say narrator "haha haha"
+		dialog.push test2
+	option "test line 2" say narrator "I could see a ruddy light streaming through a rift in the clouds"
+	option "test line 3" say narrator "By the same illusion which lifts the horizon of the sea to the level of the spectator on a hillside"
+	option "test line 4" say narrator "The sable cloud beneath was dished out"
+	option "test line 5 (exit)" dialog.exit
+
+
+dialog test2
+	option "test line 6" say narrator "Apparently we had reached a great height in the atmosphere"
+	option "test line 7" dialog.pop
+
 set stage.main.location = village
-set stage.ui.location = speech
 set stage.main.hidden = false
 
-function say text:string
-	local lines = {.text.measure text speech.textarea 'default'}
-	in speech.textarea set
-		buffer = lines
-		text = {array.pop lines}
-		thread = {thread.current}
-	set stage.main.disabled = true
-	set stage.ui.hidden = false
-	_yield
-	unset speech.textarea.thread
+item testItem1
+item testItem2
+item testItem3
+
+set inventory.array = [
+	testItem1
+	testItem2
+	testItem3
+	testItem2
+	testItem1
+	testItem3
+	testItem3
+	testItem2
+	testItem1
+	testItem3
+]
+
+inventory.show

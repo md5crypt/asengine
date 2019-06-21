@@ -121,3 +121,13 @@ namespace __system
 			if func func
 
 	set self.stage = [stage.main stage.ui]
+
+function trigger o:namespace name:string target?:namespace
+	local func = (o "__on_$name")
+	if {typeof func} == "event"
+		if target
+			func target
+		else
+			func
+		return true
+	return false

@@ -92,7 +92,7 @@ class AsEngine {
 		this.stage = []
 		this.app.stage.interactiveChildren = false
 		this.app.stage.interactive = true
-		this.app.stage.hitArea = this.app.screen
+		this.app.stage.hitArea = this.app.screen.clone()
 		this.app.stage.on('pointertap', (e: PIXI.interaction.InteractionEvent) => {
 			const point = e.data.global
 			for (let i = this.stage.length - 1; i >= 0; i--) {
@@ -307,37 +307,14 @@ class AsEngine {
 		}
 	}
 
-	public static readonly baseObjectProps: AsVm.HashmapKeyList = [
-		['hidden', AsVm.Type.BOOLEAN],
-		['disabled', AsVm.Type.BOOLEAN],
-		['top', AsVm.Type.INTEGER],
-		['left', AsVm.Type.INTEGER],
-		['sprite', AsVm.Type.STRING]
-	]
-
-	public static readonly proxyObjectProps: AsVm.HashmapKeyList = [
-		['proxyObject', AsVm.Type.HASHMAP],
-		['proxySprite', AsVm.Type.STRING]
-	]
-
-	public static readonly textObjectProps: AsVm.HashmapKeyList = [
-		['text', AsVm.Type.STRING],
-		['fontSize', AsVm.Type.STRING],
-		['fontFamily', AsVm.Type.STRING],
-		['fontColor', AsVm.Type.STRING]
-	]
-
-	public static readonly stageProps: AsVm.HashmapKeyList = [
-		['location', AsVm.Type.LOCATION],
-		['hidden', AsVm.Type.BOOLEAN],
-		['disabled', AsVm.Type.BOOLEAN]
-	]
-
-	public static readonly fontOptionsList = [
-		['fontSize', 'fontSize'],
-		['fontFamily', 'fontFamily'],
-		['fontColor', 'fill'],
-	]
+	public getTextStyle(mmid: vm_mmid_t, width?: number) {
+		try {
+			const json = JSON.parse(this.vm.readVmString(mmid)) as Object
+			return new PIXI.TextStyle(width ? {...json, wordWrap: true, wordWrapWidth: width} : json)
+		} catch {
+			return AsEngine.fallbackTextStyle
+		}
+	}
 
 	private createSprite(frame: AsEngine.FrameData, object: AsEngine.ObjectData): PIXI.Sprite | null {
 		const vm = this.vm
@@ -350,7 +327,7 @@ class AsEngine {
 				break
 			case ResourceImageType.PROXY: {
 				const exProps = vm.readHashmapKeys(hashmap, AsEngine.proxyObjectProps) as AsEngine.ProxyObjectProps
-				const proxyObject = exProps.proxyObject ? this.objectMap.get(exProps.proxyObject) : object
+				const proxyObject = exProps.proxyObject && this.objectMap.get(exProps.proxyObject)
 				if (!proxyObject) {
 					console.error(`invalid proxyObject value '${exProps.proxyObject}' in '${vm.getHashmapPath(object.mmid)}'`)
 					break
@@ -362,16 +339,17 @@ class AsEngine {
 					break
 				}
 				sprite = this.createSprite(proxyFrame, proxyObject)
+				if (sprite) {
+					sprite.x += proxyFrame.left
+					sprite.y += proxyFrame.top
+				}
 				break
 			} case ResourceImageType.TEXT: {
 				const exProps = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
-				const style: {[key: string]: any} = {}
-				for (const [prop, key] of AsEngine.fontOptionsList) {
-					if ((exProps as any)[prop]) {
-						style[key] = vm.readVmString((exProps as any)[prop] as vm_mmid_t)
-					}
-				}
-				sprite = new PIXI.Text(exProps.text ? vm.readVmString(exProps.text) : 'no text', style)
+				sprite = new PIXI.Text(
+					exProps.text ? vm.readVmString(exProps.text) : 'no text',
+					exProps.font ? this.getTextStyle(exProps.font) : AsEngine.fallbackTextStyle
+				)
 				sprite.hitArea = new PIXI.Rectangle(0, 0, frame.image.width, frame.image.height)
 				break
 			} default:
@@ -403,8 +381,8 @@ class AsEngine {
 			} else {
 				sprite.visible = !props.hidden
 				sprite.interactive = !props.disabled
-				sprite.x = frame.left + (props.left || 0)
-				sprite.y = frame.top + (props.top || 0)
+				sprite.x += frame.left + (props.left || 0)
+				sprite.y += frame.top + (props.top || 0)
 			}
 			stage.container.setChildAt(sprite, index)
 		}
@@ -440,6 +418,32 @@ class AsEngine {
 		}
 		return null
 	}
+
+	public static readonly fallbackTextStyle = new PIXI.TextStyle({fill: 'pink', fontSize: '18px', lineJoin: 'round', stroke: 'white', strokeThickness: 4})
+
+	public static readonly baseObjectProps: AsVm.HashmapKeyList = [
+		['hidden', AsVm.Type.BOOLEAN],
+		['disabled', AsVm.Type.BOOLEAN],
+		['top', AsVm.Type.INTEGER],
+		['left', AsVm.Type.INTEGER],
+		['sprite', AsVm.Type.STRING]
+	]
+
+	public static readonly proxyObjectProps: AsVm.HashmapKeyList = [
+		['proxyObject', AsVm.Type.HASHMAP],
+		['proxySprite', AsVm.Type.STRING]
+	]
+
+	public static readonly textObjectProps: AsVm.HashmapKeyList = [
+		['text', AsVm.Type.STRING],
+		['font', AsVm.Type.STRING],
+	]
+
+	public static readonly stageProps: AsVm.HashmapKeyList = [
+		['location', AsVm.Type.LOCATION],
+		['hidden', AsVm.Type.BOOLEAN],
+		['disabled', AsVm.Type.BOOLEAN]
+	]
 }
 
 namespace AsEngine {
@@ -488,9 +492,7 @@ namespace AsEngine {
 
 	export interface TextObjectProps extends BaseObjectProps {
 		text: vm_mmid_t
-		fontSize?: vm_mmid_t
-		fontColor?: vm_mmid_t
-		fontFamily?: vm_mmid_t
+		font?: vm_mmid_t
 	}
 
 	export interface StageProps {
@@ -502,6 +504,25 @@ namespace AsEngine {
 
 window.addEventListener('load', async () => {
 	const app = new PIXI.Application({width: 1366, height: 768})
+	/* const resize = () => {
+		//const width = 1366
+		//const height = 768
+		const vW = window.innerWidth
+		const vH = window.innerHeight
+		let nw
+		let nh
+		console.log(vH)
+		if ((vH / vW) < (height / width)) {
+			nh = vH
+			nw = Math.round((vH * width) / height)
+		} else {
+			nw = vW
+			nh = Math.round((vW * height) / width)
+		}
+		app.renderer.resize(nw, nh)
+		app.stage.scale.set(nw / width)
+	}
+	window.addEventListener("resize", resize) */
 	document.body.appendChild(app.view)
 	const files = await Promise.all([
 		axios.get("asvm.wasm", {responseType: 'arraybuffer'}),
@@ -511,6 +532,7 @@ window.addEventListener('load', async () => {
 
 	const vm = await AsVm.create(files[0].data as ArrayBuffer)
 	const engine = new AsEngine(vm, app)
+	// resize()
 
 	function checkArgs(top: vm_variable_t, argc: number, expected: number, ...types: AsVm.Type[]): AsVm.Exception {
 		if (argc != expected) {
@@ -559,17 +581,13 @@ window.addEventListener('load', async () => {
 			vm.setReturnValue(top, vm.createVmString("sprite not found"), AsVm.Type.STRING)
 			return AsVm.Exception.USER
 		}
-		const text = vm.readVmString(vm.getArgValue(top, 1) as vm_mmid_t)
+		const text = vm.readVmString(vm.getArgValue(top, 1) as vm_mmid_t).replace(/\s+/g, ' ').trim()
 		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		const props = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
-		const style: {[key: string]: any} = { wordWrap: true, wordWrapWidth: frame.image.width }
-		for (const [prop, key] of AsEngine.fontOptionsList) {
-			if ((props as any)[prop]) {
-				style[key] = vm.readVmString((props as any)[prop] as vm_mmid_t)
-			}
-		}
-		const result = PIXI.TextMetrics.measureText(text, new PIXI.TextStyle(style))
-		console.log(result, frame.image, style)
+		const result = PIXI.TextMetrics.measureText(
+			text,
+			props.font ? engine.getTextStyle(props.font, frame.image.width) : AsEngine.fallbackTextStyle
+		)
 		const linesPerFrame = Math.floor(frame.image.height / result.lineHeight)
 		const blocks: string[] = []
 		while (result.lines.length > linesPerFrame) {
