@@ -1,6 +1,12 @@
 character narrator
 
 location village "xoxoxo"
+	object test1
+		on use dialog.start .test
+
+	object test2
+		on use inventory.show
+
 	object cow
 		on use
 			if !self.thread
@@ -50,6 +56,7 @@ dialog test2
 
 set stage.main.location = village
 set stage.main.hidden = false
+set stage.main.disabled = false
 
 item testItem1
 item testItem2
@@ -67,5 +74,3 @@ set inventory.array = [
 	testItem1
 	testItem3
 ]
-
-inventory.show

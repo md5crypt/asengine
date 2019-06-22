@@ -114,13 +114,22 @@ namespace stage
 		set self.hidden = true
 
 namespace __system
-	function dispatch target:object
-		print target
+	function dispatch event:string target:object
+		print "$event ${string.from target}"
 		if !target.disabled
-			local func = target.__on_use
-			if func func
+			if event == "click"
+				local func = target.__on_use
+				if func
+					func
+			elseif event == "pointerEnter"
+				if target.__on_use
+					set __system.cursor.sprite = "action"
+					print "set"
+			elseif event == "pointerLeave"
+				set __system.cursor.sprite = "default"
 
 	set self.stage = [stage.main stage.ui]
+	object cursor
 
 function trigger o:namespace name:string target?:namespace
 	local func = (o "__on_$name")

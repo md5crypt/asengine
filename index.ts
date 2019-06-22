@@ -77,6 +77,7 @@ class AsEngine {
 	private runTimeout: NodeJS.Timeout | null
 	private busy: boolean
 	private dirty: boolean
+	private cursor: PIXI.Sprite
 
 	constructor(vm: AsVm, app: PIXI.Application) {
 		this.vm = vm
@@ -93,32 +94,78 @@ class AsEngine {
 		this.app.stage.interactiveChildren = false
 		this.app.stage.interactive = true
 		this.app.stage.hitArea = this.app.screen.clone()
-		this.app.stage.on('pointertap', (e: PIXI.interaction.InteractionEvent) => {
-			const point = e.data.global
-			for (let i = this.stage.length - 1; i >= 0; i--) {
-				const result = this.stage[i].container.hitTest(point)
-				if(result) {
-					let mmid: vm_mmid_t = 0
-					for (const object of this.stage[i].location!.objectMap!.values()) {
-						if (object.zindex == (result - 1)) {
-							mmid = object.mmid
-							break
-						}
+		this.cursor = new PIXI.Sprite(PIXI.Texture.EMPTY)
+	}
+
+	private hitTest(point: PIXI.Point) {
+		for (let i = this.stage.length - 1; i >= 0; i--) {
+			const result = this.stage[i].container.hitTest(point)
+			if(result) {
+				for (const object of this.stage[i].location!.objectMap!.values()) {
+					if (object.zindex == (result - 1)) {
+						return object.mmid
 					}
-					if (!mmid) {
-						throw new Error("wtf?")
-					}
-					this.vm.vmCall(this.dispatcher, {type: AsVm.Type.OBJECT, value: mmid})
-					this.run()
-					break
 				}
+				throw new Error("wtf?")
 			}
-		})
+		}
+		return 0 as vm_mmid_t
 	}
 
 	public init(image: ArrayBuffer, resources: ResourceFile) {
 		this.vm.vmInit(new Uint8Array(image))
 		this.loadResources(resources)
+		this.app.stage.on('pointertap', (e: PIXI.interaction.InteractionEvent) => {
+			const mmid = this.hitTest(e.data.global)
+			if (mmid) {
+				this.vm.vmCall(
+					this.dispatcher,
+					{type: AsVm.Type.OBJECT, value: mmid},
+					{type: AsVm.Type.STRING, value: this.vm.intern("click")}
+				)
+				this.run()
+			}
+		})
+		const cursorVar = this.vm.resolve('__system.cursor')
+		if (cursorVar.type == AsVm.Type.OBJECT) {
+			const cursor = this.objectMap.get(cursorVar.value as vm_mmid_t)
+			if (!cursor) {
+				throw new Error("no cursor resource found")
+			}
+			const keys: [string, AsVm.Type][] = [['sprite', AsVm.Type.STRING]]
+			let lastMmid = 0 as vm_mmid_t
+			this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
+				const o = this.vm.readHashmapKeys(this.vm.$._vm_memory_get_ptr(cursor.mmid) as vm_hashmap_t, keys) as {sprite?: vm_mmid_t}
+				const name = o.sprite || this.vm.intern('default')
+				const texture = cursor.frameMap.get(name)
+				if (!texture) {
+					console.log(`cursor sprite "${this.vm.readVmString(name)}" not found`)
+				} else {
+					this.cursor.texture = texture.image.texture!
+					const point = this.app.stage.worldTransform.applyInverse(e.data.global)
+					this.cursor.position.set(point.x + texture.left - 64, point.y + texture.top - 64)
+				}
+				const mmid = this.hitTest(e.data.global)
+				if (lastMmid != mmid) {
+					if (lastMmid) {
+						this.vm.vmCall(
+							this.dispatcher,
+							{type: AsVm.Type.OBJECT, value: lastMmid},
+							{type: AsVm.Type.STRING, value: this.vm.intern("pointerLeave")}
+						)
+					}
+					if (mmid) {
+						this.vm.vmCall(
+							this.dispatcher,
+							{type: AsVm.Type.OBJECT, value: mmid},
+							{type: AsVm.Type.STRING, value: this.vm.intern("pointerEnter")}
+						)
+					}
+					this.run()
+				}
+				lastMmid = mmid
+			})
+		}
 	}
 
 	private readStageData() {
@@ -142,6 +189,7 @@ class AsEngine {
 				container
 			})
 		}
+		this.app.stage.addChild(this.cursor)
 	}
 
 	public run() {
@@ -208,7 +256,7 @@ class AsEngine {
 			frameMap.set(vm.intern(frame.name), frameObject)
 			this.frameMap.set(frameObject.id, frameObject)
 		}
-		if (!frameMap.has(defaultKey)) {
+		if (!frameMap.has(defaultKey) && (frames.length > 0)) {
 			frameMap.set(defaultKey, frameMap.get(vm.intern(frames[0].name))!)
 		}
 		return frameMap
@@ -505,8 +553,8 @@ namespace AsEngine {
 window.addEventListener('load', async () => {
 	const app = new PIXI.Application({width: 1366, height: 768})
 	/* const resize = () => {
-		//const width = 1366
-		//const height = 768
+		const width = 1366
+		const height = 768
 		const vW = window.innerWidth
 		const vH = window.innerHeight
 		let nw

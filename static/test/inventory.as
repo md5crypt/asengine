@@ -3,6 +3,8 @@ location inventory
 	set self.boxes = [box1 box2 box3 box4 box5 box6]
 	set self.offset = 0
 
+	object closeBtn
+		on use inventory.close
 	object down
 		on use
 			set parent.offset = parent.offset + 3
@@ -19,6 +21,10 @@ location inventory
 	object box5
 	object box6
 	object grid
+
+	function close
+		set stage.main.disabled = false
+		set stage.ui.hidden = true
 
 	function show
 		set stage.main.disabled = true
