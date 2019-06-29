@@ -1,6 +1,14 @@
 import { AsVm, vm_mmid_t, vm_variable_t, vm_hashmap_t, vm_thread_t, vm_array_t } from "./casvm/emscripten/asvm"
 import { ResourceFile, ResourceFrame, ResourceGroup, ResourceImageType } from "./asrc/ResourceFile"
 
+
+declare module "pixi.js" {
+	interface Sprite {
+		object: AsEngine.ObjectData
+		frame: AsEngine.FrameData
+	}
+}
+
 interface ThreadTimer {
 	expire: number
 	thread: vm_mmid_t
@@ -8,7 +16,8 @@ interface ThreadTimer {
 
 class ArrayContainer extends PIXI.Container {
 	protected _boundsID!: number
-	public setChildAt(child: PIXI.DisplayObject, index: number) {
+	public children!: PIXI.Sprite[]
+	public setChildAt(child: PIXI.Sprite, index: number) {
 		(this.children[index] as any).parent = null
 		if (child.parent) {
 			child.parent.removeChild(child)
@@ -27,12 +36,20 @@ class ArrayContainer extends PIXI.Container {
 				if (sprite.visible && sprite.interactive) {
 					sprite.worldTransform.applyInverse(point, transformed)
 					if (sprite.hitArea.contains(transformed.x, transformed.y)) {
-						return i
+						return sprite
 					}
 				}
 			}
 		}
-		return 0
+		return null
+	}
+
+	public destroyChildren() {
+		const copy = this.children.slice(0)
+		this.removeChildren()
+		for (const sprite of copy) {
+			sprite.destroy()
+		}
 	}
 }
 
@@ -101,12 +118,7 @@ class AsEngine {
 		for (let i = this.stage.length - 1; i >= 0; i--) {
 			const result = this.stage[i].container.hitTest(point)
 			if(result) {
-				for (const object of this.stage[i].location!.objectMap!.values()) {
-					if (object.zindex == (result - 1)) {
-						return object.mmid
-					}
-				}
-				throw new Error("wtf?")
+				return result.object.mmid
 			}
 		}
 		return 0 as vm_mmid_t
@@ -144,6 +156,7 @@ class AsEngine {
 					this.cursor.texture = texture.image.texture!
 					const point = this.app.stage.worldTransform.applyInverse(e.data.global)
 					this.cursor.position.set(point.x + texture.left - 64, point.y + texture.top - 64)
+					this.cursor.pivot.set(texture.image.width / 2, texture.image.height / 2)
 				}
 				const mmid = this.hitTest(e.data.global)
 				if (lastMmid != mmid) {
@@ -364,14 +377,21 @@ class AsEngine {
 		}
 	}
 
-	private createSprite(frame: AsEngine.FrameData, object: AsEngine.ObjectData): PIXI.Sprite | null {
+	private createSprite(frame: AsEngine.FrameData, object: AsEngine.ObjectData, old: PIXI.Sprite): PIXI.Sprite | null {
 		const vm = this.vm
 		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		let sprite: PIXI.Sprite | null = null
 		switch (frame.image.type) {
 			case ResourceImageType.FRAME:
-				sprite = new PIXI.Sprite(frame.image.texture!)
-				sprite.hitArea = new HitmapRectangle(frame.image)
+				if (old.frame == frame) {
+					sprite = old
+				} else {
+					sprite = new PIXI.Sprite(frame.image.texture!)
+					sprite.frame = frame
+					sprite.object = object
+					sprite.hitArea = new HitmapRectangle(frame.image)
+					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
+				}
 				break
 			case ResourceImageType.PROXY: {
 				const exProps = vm.readHashmapKeys(hashmap, AsEngine.proxyObjectProps) as AsEngine.ProxyObjectProps
@@ -386,19 +406,26 @@ class AsEngine {
 					console.error(`sprite '${vm.readVmString(proxyName)}' not found in object '${vm.getHashmapPath(proxyObject.mmid)}'`, proxyObject.frameMap, vm.intern('default'))
 					break
 				}
-				sprite = this.createSprite(proxyFrame, proxyObject)
+				sprite = this.createSprite(proxyFrame, proxyObject, old)
 				if (sprite) {
-					sprite.x += proxyFrame.left
-					sprite.y += proxyFrame.top
+					sprite.object = object
 				}
 				break
 			} case ResourceImageType.TEXT: {
 				const exProps = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
-				sprite = new PIXI.Text(
-					exProps.text ? vm.readVmString(exProps.text) : 'no text',
-					exProps.font ? this.getTextStyle(exProps.font) : AsEngine.fallbackTextStyle
-				)
-				sprite.hitArea = new PIXI.Rectangle(0, 0, frame.image.width, frame.image.height)
+				const text = exProps.text ? vm.readVmString(exProps.text) : 'no text'
+				const style = exProps.font ? this.getTextStyle(exProps.font) : AsEngine.fallbackTextStyle
+				if (old.frame == frame) {
+					(old as PIXI.Text).text = text;
+					(old as PIXI.Text).style = style
+					sprite = old
+				} else {
+					sprite = new PIXI.Text(text, style)
+					sprite.hitArea = new PIXI.Rectangle(0, 0, frame.image.width, frame.image.height)
+					sprite.frame = frame
+					sprite.object = object
+					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
+				}
 				break
 			} default:
 				console.error(frame)
@@ -422,17 +449,23 @@ class AsEngine {
 			console.log(`sprite '${vm.readVmString(name)}' not found in object '${vm.getHashmapPath(object.mmid)}'`)
 		} else {
 			const index = (stage.location == object) ? 0 : (object.zindex + 1)
-			let sprite = this.createSprite(frame, object)
+			const oldSprite = stage.container.children[index]
+			let sprite = this.createSprite(frame, object, oldSprite)
 			if (!sprite) {
 				sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
 				sprite.visible = false
 			} else {
+				console.log(props)
 				sprite.visible = !props.hidden
 				sprite.interactive = !props.disabled
-				sprite.x += frame.left + (props.left || 0)
-				sprite.y += frame.top + (props.top || 0)
+				sprite.position.set(frame.left + (props.left || 0), frame.top + (props.top || 0))
+				sprite.scale.set(Math.abs(props.scale || 1), props.scale || 1)
+				sprite.angle = props.rotation || 0
 			}
-			stage.container.setChildAt(sprite, index)
+			if (sprite != oldSprite) {
+				stage.container.setChildAt(sprite, index)
+				oldSprite.destroy()
+			}
 		}
 		vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4] = 0
 	}
@@ -443,7 +476,7 @@ class AsEngine {
 		}
 
 		if (stage.render) {
-			stage.container.removeChildren()
+			stage.container.destroyChildren()
 			for (let i = 0; i < stage.location.objectMap!.size + 1; i++) {
 				const sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
 				sprite.visible = false
@@ -474,6 +507,8 @@ class AsEngine {
 		['disabled', AsVm.Type.BOOLEAN],
 		['top', AsVm.Type.INTEGER],
 		['left', AsVm.Type.INTEGER],
+		['scale', AsVm.Type.NUMERIC],
+		['rotation', AsVm.Type.NUMERIC],
 		['sprite', AsVm.Type.STRING]
 	]
 
@@ -530,6 +565,8 @@ namespace AsEngine {
 		disabled?: boolean
 		top?: number
 		left?: number
+		scale?: number
+		rotation?: number
 		sprite?: vm_mmid_t
 	}
 
