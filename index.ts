@@ -44,6 +44,10 @@ class ArrayContainer extends PIXI.Container {
 		}
 		return null
 	}
+
+	get size() {
+		return this.children.length
+	}
 }
 
 class HitmapRectangle extends PIXI.Rectangle {
@@ -81,12 +85,17 @@ class AsEngine {
 	public readonly spriteMap: Map<number, AsEngine.SpriteData>
 	public readonly imageMap: Map<string, AsEngine.ImageData>
 	public readonly app: PIXI.Application
+	private rootContainer: ArrayContainer
 	private stage: AsEngine.StageData[]
 	private dispatcher: vm_mmid_t
 	private timers: ThreadTimer[]
 	private dirty: boolean
-	private cursor: PIXI.Sprite
+	private cursor!: AsEngine.ObjectData
 	private animations: Set<PIXI.Sprite>
+	private cursorBase: PIXI.Point
+	private cursorPosition: PIXI.Point
+	private cursorMoved: boolean
+	private cursorHover: vm_mmid_t
 
 	constructor(vm: AsVm, app: PIXI.Application) {
 		this.vm = vm
@@ -98,11 +107,16 @@ class AsEngine {
 		this.spriteMap = new Map()
 		this.dispatcher = 0
 		this.stage = []
-		this.app.stage.interactiveChildren = false
-		this.app.stage.interactive = true
-		this.app.stage.hitArea = this.app.screen.clone()
+		this.rootContainer = new ArrayContainer()
+		this.rootContainer.interactiveChildren = false
+		this.rootContainer.interactive = true
+		this.rootContainer.hitArea = this.app.screen.clone()
+		this.app.stage = this.rootContainer
 		this.animations = new Set()
-		this.cursor = new PIXI.Sprite(PIXI.Texture.EMPTY)
+		this.cursorBase = new PIXI.Point(0, 0)
+		this.cursorPosition = new PIXI.Point(0, 0)
+		this.cursorMoved = true
+		this.cursorHover = 0
 	}
 
 	private hitTest(point: PIXI.Point) {
@@ -133,51 +147,20 @@ class AsEngine {
 		if (!cursor) {
 			throw new Error("no cursor resource found")
 		}
-		let lastMmid = 0 as vm_mmid_t
-		this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
-			const props: AsEngine.BaseObjectProps = this.vm.readHashmapKeys(this.vm.$.vm_memory_get_ptr(cursor.mmid) as vm_hashmap_t, AsEngine.baseObjectProps)
-			const name = props.sprite || this.vm.intern('default')
-			const spriteData = cursor.spriteMap.get(name)
-			if (!spriteData) {
-				console.error(`cursor sprite "${this.vm.readVmString(name)}" not found`)
-			} else {
-				const sprite = this.createSprite(spriteData, cursor, this.cursor)
-				if (sprite) {
-					const point = this.app.stage.worldTransform.applyInverse(e.data.global)
-					sprite.visible = !props.hidden
-					sprite.position.x += point.x
-					sprite.position.y += point.y
-					sprite.scale.set(Math.abs(props.scale || 1), props.scale || 1)
-					sprite.angle = props.rotation || 0
-					if (sprite != this.cursor) {
-						this.app.stage.removeChild(this.cursor)
-						if (this.animations.delete(this.cursor)) {
-							this.dispatch("animationDestroy", this.cursor.object.mmid)
-						}
-						this.cursor.destroy()
-						this.app.stage.addChild(sprite)
-						this.cursor = sprite
-					}
-				} else {
-					console.error("failed to create cursor")
-				}
-			}
-			const mmid = this.hitTest(e.data.global)
-			if (lastMmid != mmid) {
-				if (lastMmid) {
-					this.dispatch("pointerLeave", lastMmid)
-				}
-				if (mmid) {
-					this.dispatch("pointerEnter", mmid)
-				}
-			}
-			lastMmid = mmid
-		})
-		this.app.stage.on('pointertap', (e: PIXI.interaction.InteractionEvent) => {
+		this.cursor = cursor
+		this.rootContainer.on('pointertap', (e: PIXI.interaction.InteractionEvent) => {
 			const mmid = this.hitTest(e.data.global)
 			if (mmid) {
 				this.dispatch("click", mmid)
 			}
+		})
+		this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
+			const sprite = this.rootContainer.children[this.rootContainer.size - 1]
+			const point = this.rootContainer.worldTransform.applyInverse(e.data.global)
+			sprite.position.x = this.cursorBase.x + point.x
+			sprite.position.y = this.cursorBase.y + point.y
+			this.cursorMoved = true
+			this.cursorPosition = e.data.global
 		})
 	}
 
@@ -186,12 +169,13 @@ class AsEngine {
 		this.loadResources(resources)
 		this.vm.vmRun()
 		this.readStageData()
+		this.initPointer()
 		const dispatch = this.vm.resolve('__system.dispatch')
 		if (!dispatch || (dispatch.type != AsVm.Type.FUNCTION)) {
 			throw new Error("event dispatcher not found")
 		}
 		this.dispatcher = dispatch.value as vm_mmid_t
-		this.initPointer()
+
 		this.app.ticker.add(() => {
 			const time = performance.now()
 			while (this.timers.length && this.timers[0].expire <= time) {
@@ -224,10 +208,26 @@ class AsEngine {
 					this.dirty = true
 				}
 			}
+
+			if (this.cursorMoved) {
+				this.cursorMoved = false
+				const mmid = this.hitTest(this.cursorPosition)
+				if (this.cursorHover != mmid) {
+					if (this.cursorHover) {
+						this.dispatch("pointerLeave", this.cursorHover)
+					}
+					if (mmid) {
+						this.dispatch("pointerEnter", mmid)
+					}
+					this.cursorHover = mmid
+				}
+			}
+
 			if (this.dirty) {
 				this.dirty = false
 				this.vm.vmRun()
 				this.render()
+				this.cursorMoved = true
 			}
 		})
 		this.dirty = true
@@ -246,7 +246,7 @@ class AsEngine {
 			}
 			const container = new ArrayContainer()
 			container.visible = false
-			this.app.stage.addChild(container)
+			this.rootContainer.addChild(container)
 			this.stage.push({
 				mmid: variable.value as vm_mmid_t,
 				render: true,
@@ -254,7 +254,9 @@ class AsEngine {
 				container
 			})
 		}
-		this.app.stage.addChild(this.cursor)
+		const cursor = new PIXI.Sprite(PIXI.Texture.EMPTY)
+		cursor.visible = false
+		this.rootContainer.addChild(cursor)
 	}
 
 	public pushThread(thread: vm_mmid_t, delay: number) {
@@ -385,6 +387,13 @@ class AsEngine {
 				this.renderStage(stageData)
 			}
 		}
+		if (this.drawObject(this.cursor, this.rootContainer, this.rootContainer.size - 1)) {
+			const sprite = this.rootContainer.children[this.rootContainer.size - 1]
+			const point = this.rootContainer.worldTransform.applyInverse(this.cursorPosition)
+			this.cursorBase = sprite.position.clone()
+			sprite.position.x += point.x
+			sprite.position.y += point.y
+		}
 	}
 
 	public getTextStyle(mmid: vm_mmid_t, width?: number) {
@@ -479,22 +488,20 @@ class AsEngine {
 		return sprite
 	}
 
-	private drawObject(object: AsEngine.ObjectData, stage: AsEngine.StageData) {
+	private drawObject(object: AsEngine.ObjectData, container: ArrayContainer, index: number, force = false) {
 		const vm = this.vm
 		const hashmap = vm.$.vm_memory_get_ptr(object.mmid) as vm_hashmap_t
-		if (!stage.render && !vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4]) {
+		if (!force && !vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4]) {
 			// object did not change
-			return
+			return false
 		}
-		console.info(`drawing '${vm.getHashmapPath(object.mmid)}'`)
 		const props = this.vm.readHashmapKeys(hashmap, AsEngine.baseObjectProps) as AsEngine.BaseObjectProps
 		const name = props.sprite || this.vm.intern('default')
 		const spriteData = object.spriteMap.get(name)
 		if (!spriteData) {
 			console.error(`sprite '${vm.readVmString(name)}' not found in object '${vm.getHashmapPath(object.mmid)}'`)
 		} else {
-			const index = (stage.location == object) ? 0 : (object.zindex + 1)
-			const oldSprite = stage.container.children[index]
+			const oldSprite = container.children[index]
 			let sprite = this.createSprite(spriteData, object, oldSprite)
 			if (!sprite) {
 				sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
@@ -508,7 +515,7 @@ class AsEngine {
 				sprite.angle = props.rotation || 0
 			}
 			if (sprite != oldSprite) {
-				stage.container.setChildAt(sprite, index)
+				container.setChildAt(sprite, index)
 				if (this.animations.delete(oldSprite)) {
 					this.dispatch("animationDestroy", object.mmid)
 				}
@@ -516,6 +523,7 @@ class AsEngine {
 			}
 		}
 		vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4] = 0
+		return true
 	}
 
 	private renderStage(stage: AsEngine.StageData) {
@@ -538,10 +546,11 @@ class AsEngine {
 			}
 		}
 
-		this.drawObject(stage.location, stage)
+		this.drawObject(stage.location, stage.container, 0, stage.render)
 		for (const object of stage.location.objectMap!.values()) {
-			this.drawObject(object, stage)
+			this.drawObject(object, stage.container, object.zindex + 1, stage.render)
 		}
+
 		stage.render = false
 		stage.container.visible = true
 	}
