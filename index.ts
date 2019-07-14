@@ -44,14 +44,6 @@ class ArrayContainer extends PIXI.Container {
 		}
 		return null
 	}
-
-	public destroyChildren() {
-		const copy = this.children.slice(0)
-		this.removeChildren()
-		for (const sprite of copy) {
-			sprite.destroy()
-		}
-	}
 }
 
 class HitmapRectangle extends PIXI.Rectangle {
@@ -123,74 +115,83 @@ class AsEngine {
 		return 0 as vm_mmid_t
 	}
 
-	public init(image: ArrayBuffer, resources: ResourceFile) {
-		this.vm.vmInit(new Uint8Array(image))
-		this.loadResources(resources)
+	private dispatch(event: string, object: vm_mmid_t) {
+		this.vm.vmCall(
+			this.dispatcher,
+			{type: AsVm.Type.OBJECT, value: object},
+			{type: AsVm.Type.STRING, value: this.vm.intern(event)}
+		)
+		this.dirty = true
+	}
+
+	private initPointer() {
+		const cursorVar = this.vm.resolve('__system.cursor')
+		if (cursorVar.type != AsVm.Type.OBJECT) {
+			throw new Error("invalid __system.cursor")
+		}
+		const cursor = this.objectMap.get(cursorVar.value as vm_mmid_t)
+		if (!cursor) {
+			throw new Error("no cursor resource found")
+		}
+		let lastMmid = 0 as vm_mmid_t
+		this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
+			const props: AsEngine.BaseObjectProps = this.vm.readHashmapKeys(this.vm.$.vm_memory_get_ptr(cursor.mmid) as vm_hashmap_t, AsEngine.baseObjectProps)
+			const name = props.sprite || this.vm.intern('default')
+			const spriteData = cursor.spriteMap.get(name)
+			if (!spriteData) {
+				console.error(`cursor sprite "${this.vm.readVmString(name)}" not found`)
+			} else {
+				const sprite = this.createSprite(spriteData, cursor, this.cursor)
+				if (sprite) {
+					const point = this.app.stage.worldTransform.applyInverse(e.data.global)
+					sprite.visible = !props.hidden
+					sprite.position.x += point.x
+					sprite.position.y += point.y
+					sprite.scale.set(Math.abs(props.scale || 1), props.scale || 1)
+					sprite.angle = props.rotation || 0
+					if (sprite != this.cursor) {
+						this.app.stage.removeChild(this.cursor)
+						if (this.animations.delete(this.cursor)) {
+							this.dispatch("animationDestroy", this.cursor.object.mmid)
+						}
+						this.cursor.destroy()
+						this.app.stage.addChild(sprite)
+						this.cursor = sprite
+					}
+				} else {
+					console.error("failed to create cursor")
+				}
+			}
+			const mmid = this.hitTest(e.data.global)
+			if (lastMmid != mmid) {
+				if (lastMmid) {
+					this.dispatch("pointerLeave", lastMmid)
+				}
+				if (mmid) {
+					this.dispatch("pointerEnter", mmid)
+				}
+			}
+			lastMmid = mmid
+		})
 		this.app.stage.on('pointertap', (e: PIXI.interaction.InteractionEvent) => {
 			const mmid = this.hitTest(e.data.global)
 			if (mmid) {
-				this.vm.vmCall(
-					this.dispatcher,
-					{type: AsVm.Type.OBJECT, value: mmid},
-					{type: AsVm.Type.STRING, value: this.vm.intern("click")}
-				)
-				this.dirty = true
+				this.dispatch("click", mmid)
 			}
 		})
-		const cursorVar = this.vm.resolve('__system.cursor')
-		if (cursorVar.type == AsVm.Type.OBJECT) {
-			const cursor = this.objectMap.get(cursorVar.value as vm_mmid_t)
-			if (!cursor) {
-				throw new Error("no cursor resource found")
-			}
-			let lastMmid = 0 as vm_mmid_t
-			this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
-				const props: AsEngine.BaseObjectProps = this.vm.readHashmapKeys(this.vm.$.vm_memory_get_ptr(cursor.mmid) as vm_hashmap_t, AsEngine.baseObjectProps)
-				const name = props.sprite || this.vm.intern('default')
-				const spriteData = cursor.spriteMap.get(name)
-				if (!spriteData) {
-					console.log(`cursor sprite "${this.vm.readVmString(name)}" not found`)
-				} else {
-					const sprite = this.createSprite(spriteData, cursor, this.cursor)
-					if (sprite) {
-						const point = this.app.stage.worldTransform.applyInverse(e.data.global)
-						sprite.visible = !props.hidden
-						sprite.position.x += point.x
-						sprite.position.y += point.y
-						sprite.scale.set(Math.abs(props.scale || 1), props.scale || 1)
-						sprite.angle = props.rotation || 0
-						if (sprite != this.cursor) {
-							this.app.stage.removeChild(this.cursor)
-							this.animations.delete(this.cursor)
-							this.cursor.destroy()
-							this.app.stage.addChild(sprite)
-							this.cursor = sprite
-						}
-					} else {
-						console.error("failed to create cursor")
-					}
-				}
-				const mmid = this.hitTest(e.data.global)
-				if (lastMmid != mmid) {
-					if (lastMmid) {
-						this.vm.vmCall(
-							this.dispatcher,
-							{type: AsVm.Type.OBJECT, value: lastMmid},
-							{type: AsVm.Type.STRING, value: this.vm.intern("pointerLeave")}
-						)
-					}
-					if (mmid) {
-						this.vm.vmCall(
-							this.dispatcher,
-							{type: AsVm.Type.OBJECT, value: mmid},
-							{type: AsVm.Type.STRING, value: this.vm.intern("pointerEnter")}
-						)
-					}
-					this.dirty = true
-				}
-				lastMmid = mmid
-			})
+	}
+
+	public init(image: ArrayBuffer, resources: ResourceFile) {
+		this.vm.vmInit(new Uint8Array(image))
+		this.loadResources(resources)
+		this.vm.vmRun()
+		this.readStageData()
+		const dispatch = this.vm.resolve('__system.dispatch')
+		if (!dispatch || (dispatch.type != AsVm.Type.FUNCTION)) {
+			throw new Error("event dispatcher not found")
 		}
+		this.dispatcher = dispatch.value as vm_mmid_t
+		this.initPointer()
 		this.app.ticker.add(() => {
 			const time = performance.now()
 			while (this.timers.length && this.timers[0].expire <= time) {
@@ -211,11 +212,7 @@ class AsEngine {
 					let n = sprite.frame + 1
 					if (n == data.frames.length) {
 						n = 0
-						this.vm.vmCall(
-							this.dispatcher,
-							{type: AsVm.Type.OBJECT, value: sprite.object.mmid},
-							{type: AsVm.Type.STRING, value: this.vm.intern("animationLoop")}
-						)
+						this.dispatch("animationLoop", sprite.object.mmid)
 					}
 					const frame = data.frames[n]
 					sprite.texture = frame.image.texture!
@@ -228,9 +225,9 @@ class AsEngine {
 				}
 			}
 			if (this.dirty) {
+				this.dirty = false
 				this.vm.vmRun()
 				this.render()
-				this.dirty = false
 			}
 		})
 		this.dirty = true
@@ -329,7 +326,6 @@ class AsEngine {
 	}
 
 	private loadResourceGroup(group: ResourceGroup, zindex: number, parent?: vm_mmid_t) {
-		console.log(group)
 		const vm = this.vm
 		const vmVariable = vm.resolve(group.name, parent)
 		if (!AsVm.isType(vmVariable.type, AsVm.Type.HASHMAP)) {
@@ -362,14 +358,6 @@ class AsEngine {
 
 	private render() {
 		const vm = this.vm
-		if (!this.dispatcher) {
-			this.readStageData()
-			const dispatch = this.vm.resolve('__system.dispatch')
-			if (!dispatch || (dispatch.type != AsVm.Type.FUNCTION)) {
-				throw new Error("click dispatcher not found")
-			}
-			this.dispatcher = dispatch.value as vm_mmid_t
-		}
 		for (const stageData of this.stage) {
 			const hashmap = vm.$.vm_memory_get_ptr(stageData.mmid) as vm_hashmap_t
 			if (vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4]) {
@@ -498,12 +486,12 @@ class AsEngine {
 			// object did not change
 			return
 		}
-		console.log(`drawing '${vm.getHashmapPath(object.mmid)}'`)
+		console.info(`drawing '${vm.getHashmapPath(object.mmid)}'`)
 		const props = this.vm.readHashmapKeys(hashmap, AsEngine.baseObjectProps) as AsEngine.BaseObjectProps
 		const name = props.sprite || this.vm.intern('default')
 		const spriteData = object.spriteMap.get(name)
 		if (!spriteData) {
-			console.log(`sprite '${vm.readVmString(name)}' not found in object '${vm.getHashmapPath(object.mmid)}'`)
+			console.error(`sprite '${vm.readVmString(name)}' not found in object '${vm.getHashmapPath(object.mmid)}'`)
 		} else {
 			const index = (stage.location == object) ? 0 : (object.zindex + 1)
 			const oldSprite = stage.container.children[index]
@@ -512,7 +500,6 @@ class AsEngine {
 				sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
 				sprite.visible = false
 			} else {
-				console.log(props)
 				sprite.visible = !props.hidden
 				sprite.interactive = !props.disabled
 				sprite.position.x += props.left || 0
@@ -522,7 +509,9 @@ class AsEngine {
 			}
 			if (sprite != oldSprite) {
 				stage.container.setChildAt(sprite, index)
-				this.animations.delete(oldSprite)
+				if (this.animations.delete(oldSprite)) {
+					this.dispatch("animationDestroy", object.mmid)
+				}
 				oldSprite.destroy()
 			}
 		}
@@ -535,7 +524,13 @@ class AsEngine {
 		}
 
 		if (stage.render) {
-			stage.container.destroyChildren()
+			for (const sprite of stage.container.children) {
+				sprite.destroy()
+				if (this.animations.delete(sprite)) {
+					this.dispatch("animationDestroy", sprite.object.mmid)
+				}
+			}
+			stage.container.removeChildren()
 			for (let i = 0; i < stage.location.objectMap!.size + 1; i++) {
 				const sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
 				sprite.visible = false
@@ -706,7 +701,7 @@ window.addEventListener('load', async () => {
 		if (exception != AsVm.Exception.NONE) {
 			return exception
 		}
-		console.log(vm.readVmString(vm.getArgValue(top, 1) as vm_mmid_t))
+		console.info(vm.readVmString(vm.getArgValue(top, 1) as vm_mmid_t))
 		return AsVm.Exception.NONE
 	})
 

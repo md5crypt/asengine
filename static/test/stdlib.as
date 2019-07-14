@@ -78,6 +78,7 @@ namespace thread
 	extern current '__threadCurrent'
 	extern resume '__threadResume'
 	extern detach '__threadDetach'
+	extern reattach '__threadReattach'
 
 namespace stdlib
 	import [
@@ -114,23 +115,29 @@ namespace stage
 		set self.hidden = true
 
 namespace __system
-	function dispatch event:string target:object
-		print "$event ${string.from target}"
-		if !target.disabled
-			if event == "click"
+	namespace events
+		function click target:object
+			if !target.disabled
 				local func = target.__on_use
 				if func
 					func
-			elseif event == "animationLoop"
-				if target._thread
-					thread.resume target._thread
-					unset target._thread
-			elseif event == "pointerEnter"
-				if target.__on_use
-					set __system.cursor.sprite = "action"
-					print "set"
-			elseif event == "pointerLeave"
-				set __system.cursor.sprite = "default"
+		function animationLoop target:object
+			if target._thread
+				thread.resume target._thread
+				unset target._thread
+		function animationDestroy target:object
+			if target._thread
+				thread.reattach target._thread
+				unset target._thread
+		function pointerEnter target:object
+			if target.__on_use
+				set __system.cursor.sprite = "action"
+		function pointerLeave target:object
+			set __system.cursor.sprite = "default"
+
+	function dispatch event:string target:object
+		print "$event ${string.from target}"
+		(events event) target
 
 	set self.stage = [stage.main stage.ui]
 	object cursor
