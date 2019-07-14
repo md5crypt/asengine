@@ -145,7 +145,7 @@ class AsEngine {
 			}
 			let lastMmid = 0 as vm_mmid_t
 			this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
-				const props: AsEngine.BaseObjectProps = this.vm.readHashmapKeys(this.vm.$._vm_memory_get_ptr(cursor.mmid) as vm_hashmap_t, AsEngine.baseObjectProps)
+				const props: AsEngine.BaseObjectProps = this.vm.readHashmapKeys(this.vm.$.vm_memory_get_ptr(cursor.mmid) as vm_hashmap_t, AsEngine.baseObjectProps)
 				const name = props.sprite || this.vm.intern('default')
 				const spriteData = cursor.spriteMap.get(name)
 				if (!spriteData) {
@@ -195,13 +195,13 @@ class AsEngine {
 			const time = performance.now()
 			while (this.timers.length && this.timers[0].expire <= time) {
 				const timer = this.timers.shift()!
-				const thread = this.vm.$._vm_memory_get_ptr(timer.thread) as vm_thread_t
+				const thread = this.vm.$.vm_memory_get_ptr(timer.thread) as vm_thread_t
 				const rcnt = this.vm.$u32[(thread + vm_thread_t.rnct) / 4]
 				if (rcnt == 1) {
-					this.vm.$._vm_dereference(thread, AsVm.Type.THREAD)
+					this.vm.$.vm_dereference(thread, AsVm.Type.THREAD)
 				} else {
-					this.vm.$._vm_dereference(thread, AsVm.Type.THREAD)
-					this.vm.$._vm_thread_push(thread)
+					this.vm.$.vm_dereference(thread, AsVm.Type.THREAD)
+					this.vm.$.vm_thread_push(thread)
 				}
 				this.dirty = true
 			}
@@ -242,7 +242,7 @@ class AsEngine {
 		if (!stage || (stage.type != AsVm.Type.ARRAY)) {
 			throw new Error("__system_stage missing or invalid")
 		}
-		const stageArray = vm.readArray(vm.$._vm_memory_get_ptr(stage.value as vm_mmid_t) as vm_array_t)
+		const stageArray = vm.readArray(vm.$.vm_memory_get_ptr(stage.value as vm_mmid_t) as vm_array_t)
 		for (const variable of stageArray) {
 			if (!AsVm.isType(variable.type, AsVm.Type.HASHMAP)) {
 				throw new Error("invalid value in __system_stage")
@@ -261,7 +261,7 @@ class AsEngine {
 	}
 
 	public pushThread(thread: vm_mmid_t, delay: number) {
-		this.vm.$._vm_reference_m(thread)
+		this.vm.$.vm_reference_m(thread)
 		this.timers.push({expire: performance.now() + delay, thread})
 		this.timers.sort((a, b) => a.expire - b.expire)
 	}
@@ -371,7 +371,7 @@ class AsEngine {
 			this.dispatcher = dispatch.value as vm_mmid_t
 		}
 		for (const stageData of this.stage) {
-			const hashmap = vm.$._vm_memory_get_ptr(stageData.mmid) as vm_hashmap_t
+			const hashmap = vm.$.vm_memory_get_ptr(stageData.mmid) as vm_hashmap_t
 			if (vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4]) {
 				vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4] = 0
 				const props = vm.readHashmapKeys(hashmap, AsEngine.stageProps) as AsEngine.StageProps
@@ -410,7 +410,7 @@ class AsEngine {
 
 	private createSprite(spriteData: AsEngine.SpriteData, object: AsEngine.ObjectData, old: PIXI.Sprite): PIXI.Sprite | null {
 		const vm = this.vm
-		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
+		const hashmap = vm.$.vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		let sprite: PIXI.Sprite | null = null
 		switch (spriteData.type) {
 			case ResourceImageType.FRAME: {
@@ -493,7 +493,7 @@ class AsEngine {
 
 	private drawObject(object: AsEngine.ObjectData, stage: AsEngine.StageData) {
 		const vm = this.vm
-		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
+		const hashmap = vm.$.vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		if (!stage.render && !vm.$u32[(hashmap + vm_hashmap_t.dirty) / 4]) {
 			// object did not change
 			return
@@ -689,12 +689,12 @@ window.addEventListener('load', async () => {
 
 	function checkArgs(top: vm_variable_t, argc: number, expected: number, ...types: AsVm.Type[]): AsVm.Exception {
 		if (argc != expected) {
-			vm.$._vm_exception_arity(argc, 1)
+			vm.$.vm_exception_arity(argc, 1)
 			return AsVm.Exception.ARITY
 		}
 		for (let i = 0; i < types.length; i++) {
 			if (!AsVm.isType(vm.getArgType(top, i + 1), types[i])) {
-				vm.$._vm_exception_type(vm.getArgType(top, i + 1), types[i])
+				vm.$.vm_exception_type(vm.getArgType(top, i + 1), types[i])
 				return AsVm.Exception.TYPE
 			}
 		}
@@ -715,7 +715,7 @@ window.addEventListener('load', async () => {
 		if (exception != AsVm.Exception.NONE) {
 			return exception
 		}
-		engine.pushThread(vm.$._vm_get_current_thread(), vm.getArgValue(top, 1, true))
+		engine.pushThread(vm.$.vm_get_current_thread(), vm.getArgValue(top, 1, true))
 		return AsVm.Exception.YIELD
 	})
 
@@ -740,7 +740,7 @@ window.addEventListener('load', async () => {
 		}
 		const frame = sprite as AsEngine.FrameSpriteData
 		const text = vm.readVmString(vm.getArgValue(top, 1) as vm_mmid_t).replace(/\s+/g, ' ').trim()
-		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
+		const hashmap = vm.$.vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		const props = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
 		const result = PIXI.TextMetrics.measureText(
 			text,
@@ -755,10 +755,10 @@ window.addEventListener('load', async () => {
 			blocks.push(result.lines.join('\n'))
 		}
 		const output = blocks.map(x => vm.createVmString(x))
-		const array = vm.$._vm_array_create(output.length)
-		const arrayPtr = vm.$._vm_memory_get_ptr(array) as vm_array_t
+		const array = vm.$.vm_array_create(output.length)
+		const arrayPtr = vm.$.vm_memory_get_ptr(array) as vm_array_t
 		for (let i = 0; i < output.length; i++) {
-			vm.$._vm_array_set(arrayPtr, i, output[i], AsVm.Type.STRING)
+			vm.$.vm_array_set(arrayPtr, i, output[i], AsVm.Type.STRING)
 		}
 		vm.setReturnValue(top, array, AsVm.Type.ARRAY)
 		return AsVm.Exception.NONE
