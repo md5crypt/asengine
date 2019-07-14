@@ -121,6 +121,10 @@ namespace __system
 				local func = target.__on_use
 				if func
 					func
+			elseif event == "animationLoop"
+				if target._thread
+					thread.resume target._thread
+					unset target._thread
 			elseif event == "pointerEnter"
 				if target.__on_use
 					set __system.cursor.sprite = "action"
@@ -130,6 +134,10 @@ namespace __system
 
 	set self.stage = [stage.main stage.ui]
 	object cursor
+
+function waitForLoop target:object
+	set target._thread = {thread.current}
+	_yield
 
 function trigger o:namespace name:string target?:namespace
 	local func = (o "__on_$name")

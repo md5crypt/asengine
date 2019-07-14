@@ -9,11 +9,15 @@ location village "xoxoxo"
 
 	object cow
 		on use
-			if !self.thread
+			if self.sprite != "aaa"
+				set self.sprite = "aaa"
+				waitForLoop self
+				set self.sprite = "frame1"
+			#=if !self.thread
 				print "starting cow"
 				set self.thread = {async fucking_cow}
 			else
-				unset self.thread
+				unset self.thread=#
 
 	object mouse
 		on use

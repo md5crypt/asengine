@@ -1,11 +1,12 @@
 import { AsVm, vm_mmid_t, vm_variable_t, vm_hashmap_t, vm_thread_t, vm_array_t } from "./casvm/emscripten/asvm"
-import { ResourceFile, ResourceFrame, ResourceGroup, ResourceImageType } from "./asrc/ResourceFile"
-
+import { ResourceFile, ResourceFrame, ResourceGroup, ResourceImageType, ResourceSprite, ResourceAnimation } from "./asrc/ResourceFile"
 
 declare module "pixi.js" {
 	interface Sprite {
 		object: AsEngine.ObjectData
-		frame: AsEngine.FrameData
+		spriteData: AsEngine.SpriteData
+		frame: number
+		nextFrameTime: number
 	}
 }
 
@@ -85,32 +86,30 @@ class HitmapRectangle extends PIXI.Rectangle {
 class AsEngine {
 	public readonly vm: AsVm
 	public readonly objectMap: Map<vm_mmid_t, AsEngine.ObjectData>
-	public readonly frameMap: Map<number, AsEngine.FrameData>
+	public readonly spriteMap: Map<number, AsEngine.SpriteData>
 	public readonly imageMap: Map<string, AsEngine.ImageData>
 	public readonly app: PIXI.Application
 	private stage: AsEngine.StageData[]
 	private dispatcher: vm_mmid_t
 	private timers: ThreadTimer[]
-	private runTimeout: NodeJS.Timeout | null
-	private busy: boolean
 	private dirty: boolean
 	private cursor: PIXI.Sprite
+	private animations: Set<PIXI.Sprite>
 
 	constructor(vm: AsVm, app: PIXI.Application) {
 		this.vm = vm
 		this.app = app
 		this.timers = []
-		this.runTimeout = null
-		this.busy = false
 		this.dirty = false
 		this.imageMap = new Map()
 		this.objectMap = new Map()
-		this.frameMap = new Map()
+		this.spriteMap = new Map()
 		this.dispatcher = 0
 		this.stage = []
 		this.app.stage.interactiveChildren = false
 		this.app.stage.interactive = true
 		this.app.stage.hitArea = this.app.screen.clone()
+		this.animations = new Set()
 		this.cursor = new PIXI.Sprite(PIXI.Texture.EMPTY)
 	}
 
@@ -135,7 +134,7 @@ class AsEngine {
 					{type: AsVm.Type.OBJECT, value: mmid},
 					{type: AsVm.Type.STRING, value: this.vm.intern("click")}
 				)
-				this.run()
+				this.dirty = true
 			}
 		})
 		const cursorVar = this.vm.resolve('__system.cursor')
@@ -144,19 +143,32 @@ class AsEngine {
 			if (!cursor) {
 				throw new Error("no cursor resource found")
 			}
-			const keys: [string, AsVm.Type][] = [['sprite', AsVm.Type.STRING]]
 			let lastMmid = 0 as vm_mmid_t
 			this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
-				const o = this.vm.readHashmapKeys(this.vm.$._vm_memory_get_ptr(cursor.mmid) as vm_hashmap_t, keys) as {sprite?: vm_mmid_t}
-				const name = o.sprite || this.vm.intern('default')
-				const texture = cursor.frameMap.get(name)
-				if (!texture) {
+				const props: AsEngine.BaseObjectProps = this.vm.readHashmapKeys(this.vm.$._vm_memory_get_ptr(cursor.mmid) as vm_hashmap_t, AsEngine.baseObjectProps)
+				const name = props.sprite || this.vm.intern('default')
+				const spriteData = cursor.spriteMap.get(name)
+				if (!spriteData) {
 					console.log(`cursor sprite "${this.vm.readVmString(name)}" not found`)
 				} else {
-					this.cursor.texture = texture.image.texture!
-					const point = this.app.stage.worldTransform.applyInverse(e.data.global)
-					this.cursor.position.set(point.x + texture.left - 64, point.y + texture.top - 64)
-					this.cursor.pivot.set(texture.image.width / 2, texture.image.height / 2)
+					const sprite = this.createSprite(spriteData, cursor, this.cursor)
+					if (sprite) {
+						const point = this.app.stage.worldTransform.applyInverse(e.data.global)
+						sprite.visible = !props.hidden
+						sprite.position.x += point.x
+						sprite.position.y += point.y
+						sprite.scale.set(Math.abs(props.scale || 1), props.scale || 1)
+						sprite.angle = props.rotation || 0
+						if (sprite != this.cursor) {
+							this.app.stage.removeChild(this.cursor)
+							this.animations.delete(this.cursor)
+							this.cursor.destroy()
+							this.app.stage.addChild(sprite)
+							this.cursor = sprite
+						}
+					} else {
+						console.error("failed to create cursor")
+					}
 				}
 				const mmid = this.hitTest(e.data.global)
 				if (lastMmid != mmid) {
@@ -174,11 +186,54 @@ class AsEngine {
 							{type: AsVm.Type.STRING, value: this.vm.intern("pointerEnter")}
 						)
 					}
-					this.run()
+					this.dirty = true
 				}
 				lastMmid = mmid
 			})
 		}
+		this.app.ticker.add(() => {
+			const time = performance.now()
+			while (this.timers.length && this.timers[0].expire <= time) {
+				const timer = this.timers.shift()!
+				const thread = this.vm.$._vm_memory_get_ptr(timer.thread) as vm_thread_t
+				const rcnt = this.vm.$u32[(thread + vm_thread_t.rnct) / 4]
+				if (rcnt == 1) {
+					this.vm.$._vm_dereference(thread, AsVm.Type.THREAD)
+				} else {
+					this.vm.$._vm_dereference(thread, AsVm.Type.THREAD)
+					this.vm.$._vm_thread_push(thread)
+				}
+				this.dirty = true
+			}
+			for (const sprite of this.animations.values()) {
+				if (sprite.nextFrameTime <= time) {
+					const data = sprite.spriteData as AsEngine.AnimationSpriteData
+					let n = sprite.frame + 1
+					if (n == data.frames.length) {
+						n = 0
+						this.vm.vmCall(
+							this.dispatcher,
+							{type: AsVm.Type.OBJECT, value: sprite.object.mmid},
+							{type: AsVm.Type.STRING, value: this.vm.intern("animationLoop")}
+						)
+					}
+					const frame = data.frames[n]
+					sprite.texture = frame.image.texture!
+					sprite.hitArea = new HitmapRectangle(frame.image)
+					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
+					sprite.position.set(frame.left, frame.top)
+					sprite.nextFrameTime = performance.now() + frame.delay
+					sprite.frame = n
+					this.dirty = true
+				}
+			}
+			if (this.dirty) {
+				this.vm.vmRun()
+				this.render()
+				this.dirty = false
+			}
+		})
+		this.dirty = true
 	}
 
 	private readStageData() {
@@ -205,74 +260,50 @@ class AsEngine {
 		this.app.stage.addChild(this.cursor)
 	}
 
-	public run() {
-		if (this.busy) {
-			this.dirty = true
-			return
-		}
-		this.dirty = false
-		if (this.runTimeout !== null) {
-			clearTimeout(this.runTimeout)
-			this.runTimeout = null
-		}
-		const time = Date.now()
-		const newTimers = []
-		for (const timer of this.timers) {
-			const thread = this.vm.$._vm_memory_get_ptr(timer.thread) as vm_thread_t
-			const rcnt = this.vm.$u32[(thread + vm_thread_t.rnct) / 4]
-			if (rcnt == 1) {
-				this.vm.$._vm_dereference(thread, AsVm.Type.THREAD)
-			} else if (timer.expire <= time) {
-				this.vm.$._vm_dereference(thread, AsVm.Type.THREAD)
-				this.vm.$._vm_thread_push(thread)
-			} else {
-				newTimers.push(timer)
-			}
-		}
-		this.timers = newTimers
-		this.vm.vmRun()
-		this.render()
-		if (this.timers.length) {
-			this.busy = true
-			requestAnimationFrame(() => {
-				this.busy = false
-				if (this.dirty) {
-					this.run()
-				} else {
-					let min = Infinity
-					for (const timer of this.timers) {
-						min = Math.min(min, timer.expire)
-					}
-					this.runTimeout = setTimeout(() => (this.runTimeout = null, this.run()), Math.max(0, min - Date.now()))
-				}
-			})
-		}
-	}
-
 	public pushThread(thread: vm_mmid_t, delay: number) {
 		this.vm.$._vm_reference_m(thread)
-		this.timers.push({expire: Date.now() + delay, thread})
+		this.timers.push({expire: performance.now() + delay, thread})
+		this.timers.sort((a, b) => a.expire - b.expire)
 	}
 
-	private buildFrameMap(frames: ResourceFrame[]) {
+	private buildSpriteMap(sprites: ResourceSprite[]) {
 		const vm = this.vm
 		const images = this.imageMap
-		const frameMap: Map<vm_mmid_t, AsEngine.FrameData> = new Map()
+		const spriteMap: Map<vm_mmid_t, AsEngine.SpriteData> = new Map()
 		const defaultKey = vm.intern("default")
-		for (const frame of frames) {
-			const frameObject = {
-				image: images.get(frame.image)!,
-				left: frame.left,
-				top: frame.top,
-				id: this.frameMap.size
+		for (const sprite of sprites) {
+			let spriteData: AsEngine.SpriteData
+			if (sprite.type == ResourceImageType.ANIMATION) {
+				const animation = sprite as ResourceAnimation
+				const animationData: AsEngine.AnimationSpriteData = {
+					type: sprite.type,
+					id: this.spriteMap.size,
+					frames: animation.frames.map(frame => ({
+						delay: frame.delay,
+						top: frame.top,
+						left: frame.left,
+						image: images.get(frame.image)!
+					}))
+				}
+				spriteData = animationData
+			} else {
+				const frame = sprite as ResourceFrame
+				const frameData: AsEngine.FrameSpriteData = {
+					type: sprite.type,
+					image: images.get(frame.image)!,
+					left: frame.left,
+					top: frame.top,
+					id: this.spriteMap.size
+				}
+				spriteData = frameData
 			}
-			frameMap.set(vm.intern(frame.name), frameObject)
-			this.frameMap.set(frameObject.id, frameObject)
+			spriteMap.set(vm.intern(sprite.name), spriteData)
+			this.spriteMap.set(spriteData.id, spriteData)
 		}
-		if (!frameMap.has(defaultKey) && (frames.length > 0)) {
-			frameMap.set(defaultKey, frameMap.get(vm.intern(frames[0].name))!)
+		if (!spriteMap.has(defaultKey) && (sprites.length > 0)) {
+			spriteMap.set(defaultKey, spriteMap.get(vm.intern(sprites[0].name))!)
 		}
-		return frameMap
+		return spriteMap
 	}
 
 	private loadResourceImages(resourceFile: ResourceFile) {
@@ -281,9 +312,8 @@ class AsEngine {
 			const imageData: AsEngine.ImageData = {
 				height: image.height,
 				width: image.width,
-				type: image.type
 			}
-			if (image.type == ResourceImageType.FRAME) {
+			if (image.hash[0] != '@') {
 				imageData.texture = PIXI.Texture.from(`/images/${image.hash}.png`)
 			}
 			if (image.hitmap) {
@@ -299,6 +329,7 @@ class AsEngine {
 	}
 
 	private loadResourceGroup(group: ResourceGroup, zindex: number, parent?: vm_mmid_t) {
+		console.log(group)
 		const vm = this.vm
 		const vmVariable = vm.resolve(group.name, parent)
 		if (!AsVm.isType(vmVariable.type, AsVm.Type.HASHMAP)) {
@@ -308,7 +339,7 @@ class AsEngine {
 			mmid: vmVariable.value as vm_mmid_t,
 			type: vmVariable.type,
 			zindex,
-			frameMap: this.buildFrameMap(group.frames)
+			spriteMap: this.buildSpriteMap(group.sprites)
 		}
 		if (group.children) {
 			const children: Map<vm_mmid_t, AsEngine.ObjectData> = new Map()
@@ -377,23 +408,26 @@ class AsEngine {
 		}
 	}
 
-	private createSprite(frame: AsEngine.FrameData, object: AsEngine.ObjectData, old: PIXI.Sprite): PIXI.Sprite | null {
+	private createSprite(spriteData: AsEngine.SpriteData, object: AsEngine.ObjectData, old: PIXI.Sprite): PIXI.Sprite | null {
 		const vm = this.vm
 		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		let sprite: PIXI.Sprite | null = null
-		switch (frame.image.type) {
-			case ResourceImageType.FRAME:
-				if (old.frame == frame) {
+		switch (spriteData.type) {
+			case ResourceImageType.FRAME: {
+				const frame = spriteData as AsEngine.FrameSpriteData
+				if (old.spriteData == frame) {
 					sprite = old
 				} else {
 					sprite = new PIXI.Sprite(frame.image.texture!)
-					sprite.frame = frame
+					sprite.spriteData = frame
 					sprite.object = object
 					sprite.hitArea = new HitmapRectangle(frame.image)
 					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
 				}
+				sprite.position.set(frame.left, frame.top)
 				break
-			case ResourceImageType.PROXY: {
+			} case ResourceImageType.PROXY: {
+				const frame = spriteData as AsEngine.FrameSpriteData
 				const exProps = vm.readHashmapKeys(hashmap, AsEngine.proxyObjectProps) as AsEngine.ProxyObjectProps
 				const proxyObject = exProps.proxyObject && this.objectMap.get(exProps.proxyObject)
 				if (!proxyObject) {
@@ -401,34 +435,57 @@ class AsEngine {
 					break
 				}
 				const proxyName = exProps.proxySprite || vm.intern('default')
-				const proxyFrame = proxyObject.frameMap.get(proxyName)
-				if (!proxyFrame) {
-					console.error(`sprite '${vm.readVmString(proxyName)}' not found in object '${vm.getHashmapPath(proxyObject.mmid)}'`, proxyObject.frameMap, vm.intern('default'))
+				const proxySprite = proxyObject.spriteMap.get(proxyName)
+				if (!proxySprite) {
+					console.error(`sprite '${vm.readVmString(proxyName)}' not found in object '${vm.getHashmapPath(proxyObject.mmid)}'`)
 					break
 				}
-				sprite = this.createSprite(proxyFrame, proxyObject, old)
+				sprite = this.createSprite(proxySprite, proxyObject, old)
 				if (sprite) {
 					sprite.object = object
+					sprite.position.set(frame.left, frame.top)
 				}
 				break
 			} case ResourceImageType.TEXT: {
+				const frame = spriteData as AsEngine.FrameSpriteData
 				const exProps = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
 				const text = exProps.text ? vm.readVmString(exProps.text) : 'no text'
 				const style = exProps.font ? this.getTextStyle(exProps.font) : AsEngine.fallbackTextStyle
-				if (old.frame == frame) {
+				if (old.spriteData == frame) {
 					(old as PIXI.Text).text = text;
 					(old as PIXI.Text).style = style
 					sprite = old
 				} else {
 					sprite = new PIXI.Text(text, style)
 					sprite.hitArea = new PIXI.Rectangle(0, 0, frame.image.width, frame.image.height)
-					sprite.frame = frame
+					sprite.spriteData = frame
 					sprite.object = object
 					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
 				}
+				sprite.position.set(frame.left, frame.top)
 				break
-			} default:
-				console.error(frame)
+			}
+			case ResourceImageType.ANIMATION: {
+				const data = spriteData as AsEngine.AnimationSpriteData
+				if (old.spriteData == data) {
+					sprite = old
+					sprite.position.set(data.frames[sprite.frame].left, data.frames[sprite.frame].top)
+				} else {
+					const frame = data.frames[0]
+					sprite = new PIXI.Sprite(frame.image.texture!)
+					sprite.spriteData = data
+					sprite.object = object
+					sprite.hitArea = new HitmapRectangle(frame.image)
+					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
+					sprite.position.set(frame.left, frame.top)
+					sprite.nextFrameTime = performance.now() + frame.delay
+					sprite.frame = 0
+					this.animations.add(sprite)
+				}
+				break
+			}
+			default:
+				console.error(spriteData)
 				throw new Error("unknown frame type")
 		}
 		return sprite
@@ -444,13 +501,13 @@ class AsEngine {
 		console.log(`drawing '${vm.getHashmapPath(object.mmid)}'`)
 		const props = this.vm.readHashmapKeys(hashmap, AsEngine.baseObjectProps) as AsEngine.BaseObjectProps
 		const name = props.sprite || this.vm.intern('default')
-		const frame = object.frameMap.get(name)
-		if (!frame) {
+		const spriteData = object.spriteMap.get(name)
+		if (!spriteData) {
 			console.log(`sprite '${vm.readVmString(name)}' not found in object '${vm.getHashmapPath(object.mmid)}'`)
 		} else {
 			const index = (stage.location == object) ? 0 : (object.zindex + 1)
 			const oldSprite = stage.container.children[index]
-			let sprite = this.createSprite(frame, object, oldSprite)
+			let sprite = this.createSprite(spriteData, object, oldSprite)
 			if (!sprite) {
 				sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
 				sprite.visible = false
@@ -458,12 +515,14 @@ class AsEngine {
 				console.log(props)
 				sprite.visible = !props.hidden
 				sprite.interactive = !props.disabled
-				sprite.position.set(frame.left + (props.left || 0), frame.top + (props.top || 0))
+				sprite.position.x += props.left || 0
+				sprite.position.y += props.top || 0
 				sprite.scale.set(Math.abs(props.scale || 1), props.scale || 1)
 				sprite.angle = props.rotation || 0
 			}
 			if (sprite != oldSprite) {
 				stage.container.setChildAt(sprite, index)
+				this.animations.delete(oldSprite)
 				oldSprite.destroy()
 			}
 		}
@@ -490,14 +549,6 @@ class AsEngine {
 		}
 		stage.render = false
 		stage.container.visible = true
-	}
-
-	public getFrame(object: vm_mmid_t, name: vm_mmid_t) {
-		const objectData = this.objectMap.get(object)
-		if (objectData) {
-			return objectData.frameMap.get(name) || null
-		}
-		return null
 	}
 
 	public static readonly fallbackTextStyle = new PIXI.TextStyle({fill: 'pink', fontSize: '18px', lineJoin: 'round', stroke: 'white', strokeThickness: 4})
@@ -535,20 +586,37 @@ namespace AsEngine {
 		type: AsVm.Type
 		zindex: number
 		objectMap?: Map<vm_mmid_t, ObjectData>
-		frameMap: Map<vm_mmid_t, FrameData>
+		spriteMap: Map<vm_mmid_t, SpriteData>
+	}
+
+	export interface SpriteData {
+		type: ResourceImageType
+		id: number
 	}
 
 	export interface FrameData {
 		image: ImageData
 		top: number
 		left: number
-		id: number
+	}
+
+	export interface FrameSpriteData extends SpriteData, FrameData {
+		image: ImageData
+		top: number
+		left: number
+	}
+
+	export interface AnimationFrameData extends FrameData {
+		delay: number
+	}
+
+	export interface AnimationSpriteData extends SpriteData {
+		frames: AnimationFrameData[]
 	}
 
 	export interface ImageData {
 		width: number
 		height: number
-		type: ResourceImageType
 		texture?: PIXI.Texture
 		hitmap?: Uint8Array
 	}
@@ -661,11 +729,16 @@ window.addEventListener('load', async () => {
 			vm.setReturnValue(top, vm.createVmString("object has no resources"), AsVm.Type.STRING)
 			return AsVm.Exception.USER
 		}
-		const frame = object.frameMap.get(vm.getArgValue(top, 3) as vm_mmid_t)
-		if (!frame) {
+		const sprite = object.spriteMap.get(vm.getArgValue(top, 3) as vm_mmid_t)
+		if (!sprite) {
 			vm.setReturnValue(top, vm.createVmString("sprite not found"), AsVm.Type.STRING)
 			return AsVm.Exception.USER
 		}
+		if (sprite.type != ResourceImageType.TEXT) {
+			vm.setReturnValue(top, vm.createVmString("sprite is not a text sprite"), AsVm.Type.STRING)
+			return AsVm.Exception.USER
+		}
+		const frame = sprite as AsEngine.FrameSpriteData
 		const text = vm.readVmString(vm.getArgValue(top, 1) as vm_mmid_t).replace(/\s+/g, ' ').trim()
 		const hashmap = vm.$._vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		const props = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
@@ -692,5 +765,4 @@ window.addEventListener('load', async () => {
 	})
 
 	engine.init(files[1].data as ArrayBuffer, files[2].data as ResourceFile)
-	engine.run()
 })
