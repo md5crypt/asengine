@@ -80,6 +80,17 @@ namespace thread
 	extern detach '__threadDetach'
 	extern reattach '__threadReattach'
 
+namespace tween
+	extern start '__tweenPush'
+	extern stop '__tweenDelete'
+	function wait target:hashmap
+		local list = target._tweenThreadList
+		if {istype list "array"}
+			array.push list {thread.current}
+		else
+			set target._tweenThreadList = [{thread.current}]
+		_yield
+
 namespace stdlib
 	import [
 		hashmap
@@ -115,6 +126,14 @@ namespace stage
 		set self.hidden = true
 
 namespace __system
+	function processThreadList list:any remove?:boolean
+		if {istype list "array"}
+			while {length list}
+				if remove
+					thread.reattach {array.pop list}
+				else
+					thread.resume {array.pop list}
+
 	namespace events
 		function click target:object
 			if !target.disabled
@@ -122,13 +141,13 @@ namespace __system
 				if func
 					func
 		function animationLoop target:object
-			if target._thread
-				thread.resume target._thread
-				unset target._thread
+			processThreadList target._animationThreadList
 		function animationDestroy target:object
-			if target._thread
-				thread.reattach target._thread
-				unset target._thread
+			processThreadList target._animationThreadList true
+		function tweenEnd target:object
+			processThreadList target._tweenThreadList
+		function tweenDestroy target:object
+			processThreadList target._tweenThreadList true
 		function pointerEnter target:object
 			if target.__on_use
 				set __system.cursor.sprite = "action"
@@ -143,7 +162,11 @@ namespace __system
 	object cursor
 
 function waitForLoop target:object
-	set target._thread = {thread.current}
+	local list = target._animationThreadList
+	if {istype list "array"}
+		array.push list {thread.current}
+	else
+		set target._animationThreadList = [{thread.current}]
 	_yield
 
 function trigger o:namespace name:string target?:namespace

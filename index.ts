@@ -5,6 +5,7 @@ declare module "pixi.js" {
 	interface Sprite {
 		object: AsEngine.ObjectData
 		spriteData: AsEngine.SpriteData
+		offset: PIXI.Point
 		frame: number
 		nextFrameTime: number
 	}
@@ -92,10 +93,10 @@ class AsEngine {
 	private dirty: boolean
 	private cursor!: AsEngine.ObjectData
 	private animations: Set<PIXI.Sprite>
-	private cursorBase: PIXI.Point
 	private cursorPosition: PIXI.Point
 	private cursorMoved: boolean
 	private cursorHover: vm_mmid_t
+	private tweens: Map<vm_mmid_t, AsEngine.Tween>
 
 	constructor(vm: AsVm, app: PIXI.Application) {
 		this.vm = vm
@@ -113,10 +114,10 @@ class AsEngine {
 		this.rootContainer.hitArea = this.app.screen.clone()
 		this.app.stage = this.rootContainer
 		this.animations = new Set()
-		this.cursorBase = new PIXI.Point(0, 0)
 		this.cursorPosition = new PIXI.Point(0, 0)
 		this.cursorMoved = true
 		this.cursorHover = 0
+		this.tweens = new Map()
 	}
 
 	private hitTest(point: PIXI.Point) {
@@ -157,8 +158,8 @@ class AsEngine {
 		this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
 			const sprite = this.rootContainer.children[this.rootContainer.size - 1]
 			const point = this.rootContainer.worldTransform.applyInverse(e.data.global)
-			sprite.position.x = this.cursorBase.x + point.x
-			sprite.position.y = this.cursorBase.y + point.y
+			sprite.position.x = sprite.offset.x + point.x
+			sprite.position.y = sprite.offset.y + point.y
 			this.cursorMoved = true
 			this.cursorPosition = e.data.global
 		})
@@ -178,6 +179,7 @@ class AsEngine {
 
 		this.app.ticker.add(() => {
 			const time = performance.now()
+
 			while (this.timers.length && this.timers[0].expire <= time) {
 				const timer = this.timers.shift()!
 				const thread = this.vm.$.vm_memory_get_ptr(timer.thread) as vm_thread_t
@@ -190,6 +192,7 @@ class AsEngine {
 				}
 				this.dirty = true
 			}
+
 			for (const sprite of this.animations.values()) {
 				if (sprite.nextFrameTime <= time) {
 					const data = sprite.spriteData as AsEngine.AnimationSpriteData
@@ -202,12 +205,16 @@ class AsEngine {
 					sprite.texture = frame.image.texture!
 					sprite.hitArea = new HitmapRectangle(frame.image)
 					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
-					sprite.position.set(frame.left, frame.top)
-					sprite.nextFrameTime = performance.now() + frame.delay
+					sprite.position.x += frame.left - sprite.offset.x
+					sprite.position.y += frame.top - sprite.offset.y
+					sprite.offset.set(frame.left, frame.top)
+					sprite.nextFrameTime = time + frame.delay
 					sprite.frame = n
 					this.dirty = true
 				}
 			}
+
+			this.tweenProcess(time)
 
 			if (this.cursorMoved) {
 				this.cursorMoved = false
@@ -390,9 +397,7 @@ class AsEngine {
 		if (this.drawObject(this.cursor, this.rootContainer, this.rootContainer.size - 1)) {
 			const sprite = this.rootContainer.children[this.rootContainer.size - 1]
 			const point = this.rootContainer.worldTransform.applyInverse(this.cursorPosition)
-			this.cursorBase = sprite.position.clone()
-			sprite.position.x += point.x
-			sprite.position.y += point.y
+			sprite.position.set(sprite.offset.x + point.x, sprite.offset.y + point.y)
 		}
 	}
 
@@ -420,8 +425,8 @@ class AsEngine {
 					sprite.object = object
 					sprite.hitArea = new HitmapRectangle(frame.image)
 					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
+					sprite.offset = new PIXI.Point(frame.left, frame.top)
 				}
-				sprite.position.set(frame.left, frame.top)
 				break
 			} case ResourceImageType.PROXY: {
 				const frame = spriteData as AsEngine.FrameSpriteData
@@ -440,7 +445,7 @@ class AsEngine {
 				sprite = this.createSprite(proxySprite, proxyObject, old)
 				if (sprite) {
 					sprite.object = object
-					sprite.position.set(frame.left, frame.top)
+					sprite.offset.set(frame.left, frame.top)
 				}
 				break
 			} case ResourceImageType.TEXT: {
@@ -458,15 +463,14 @@ class AsEngine {
 					sprite.spriteData = frame
 					sprite.object = object
 					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
+					sprite.offset = new PIXI.Point(frame.left, frame.top)
 				}
-				sprite.position.set(frame.left, frame.top)
 				break
 			}
 			case ResourceImageType.ANIMATION: {
 				const data = spriteData as AsEngine.AnimationSpriteData
 				if (old.spriteData == data) {
 					sprite = old
-					sprite.position.set(data.frames[sprite.frame].left, data.frames[sprite.frame].top)
 				} else {
 					const frame = data.frames[0]
 					sprite = new PIXI.Sprite(frame.image.texture!)
@@ -474,9 +478,9 @@ class AsEngine {
 					sprite.object = object
 					sprite.hitArea = new HitmapRectangle(frame.image)
 					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
-					sprite.position.set(frame.left, frame.top)
 					sprite.nextFrameTime = performance.now() + frame.delay
 					sprite.frame = 0
+					sprite.offset = new PIXI.Point(frame.left, frame.top)
 					this.animations.add(sprite)
 				}
 				break
@@ -509,8 +513,10 @@ class AsEngine {
 			} else {
 				sprite.visible = !props.hidden
 				sprite.interactive = !props.disabled
-				sprite.position.x += props.left || 0
-				sprite.position.y += props.top || 0
+				sprite.position.set(
+					(props.left || 0) + sprite.offset.x,
+					(props.top || 0) + sprite.offset.y
+				)
 				sprite.scale.set(Math.abs(props.scale || 1), props.scale || 1)
 				sprite.angle = props.rotation || 0
 			}
@@ -553,6 +559,44 @@ class AsEngine {
 
 		stage.render = false
 		stage.container.visible = true
+	}
+
+	public tweenPush(tween: AsEngine.Tween) {
+		if (this.tweens.has(tween.mmid)) {
+			this.dispatch("tweenDestroy", tween.mmid)
+		}
+		tween.start = performance.now()
+		this.tweens.set(tween.mmid, tween)
+	}
+
+	public tweenDelete(mmid: vm_mmid_t) {
+		if (this.tweens.delete(mmid)) {
+			this.dispatch("tweenDestroy", mmid)
+		}
+	}
+
+	private tweenProcess(time: number) {
+		const rmList: vm_mmid_t[] = []
+		for (const tween of this.tweens.values()) {
+			const current = time - tween.start!
+			const k = Math.min(1, current / tween.duration)
+			const x = Math.floor(tween.x0 + (k * tween.dx))
+			const y = Math.floor(tween.y0 + (k * tween.dy))
+			let hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
+			this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("left"), x, AsVm.Type.INTEGER)
+			hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
+			this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("top"), y, AsVm.Type.INTEGER)
+			if ((tween.xLast != x) || (tween.yLast != y)) {
+				this.dirty = true
+				tween.xLast = x
+				tween.yLast = y
+			}
+			if (k == 1) {
+				this.dispatch("tweenEnd", tween.mmid)
+				rmList.push(tween.mmid)
+			}
+		}
+		rmList.forEach(mmid => this.tweens.delete(mmid))
 	}
 
 	public static readonly fallbackTextStyle = new PIXI.TextStyle({fill: 'pink', fontSize: '18px', lineJoin: 'round', stroke: 'white', strokeThickness: 4})
@@ -657,6 +701,18 @@ namespace AsEngine {
 		hidden?: boolean
 		disabled?: boolean
 	}
+
+	export interface Tween {
+		mmid: vm_mmid_t
+		x0: number
+		y0: number
+		dx: number
+		dy: number
+		duration: number
+		xLast?: number,
+		yLast?: number,
+		start?: number
+	}
 }
 
 window.addEventListener('load', async () => {
@@ -721,6 +777,35 @@ window.addEventListener('load', async () => {
 		}
 		engine.pushThread(vm.$.vm_get_current_thread(), vm.getArgValue(top, 1, true))
 		return AsVm.Exception.YIELD
+	})
+
+	vm.addFunction('__tweenPush', (top, argc) => {
+		const exception = checkArgs(top, argc, 4, AsVm.Type.HASHMAP, AsVm.Type.INTEGER, AsVm.Type.INTEGER, AsVm.Type.INTEGER)
+		if (exception != AsVm.Exception.NONE) {
+			return exception
+		}
+		const mmid = vm.getArgValue(top, 1) as vm_mmid_t
+		const hashmap = vm.$.vm_memory_get_ptr(mmid) as vm_hashmap_t
+		const data = vm.readHashmapKeys(hashmap, [["left", AsVm.Type.INTEGER], ["top", AsVm.Type.INTEGER]]) as {top?: number, left?: number}
+		engine.tweenPush({
+			mmid,
+			x0: data.left || 0,
+			y0: data.top || 0,
+			dx: vm.getArgValue(top, 2, true) as number,
+			dy: vm.getArgValue(top, 3, true) as number,
+			duration: vm.getArgValue(top, 4, true) as number
+		})
+		return AsVm.Exception.NONE
+	})
+
+	vm.addFunction('__tweenDelete', (top, argc) => {
+		const exception = checkArgs(top, argc, 1, AsVm.Type.HASHMAP)
+		if (exception != AsVm.Exception.NONE) {
+			return exception
+		}
+		const mmid = vm.getArgValue(top, 1) as vm_mmid_t
+		engine.tweenDelete(mmid)
+		return AsVm.Exception.NONE
 	})
 
 	vm.addFunction('__textMeasure', (top, argc) => {

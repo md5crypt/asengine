@@ -12,6 +12,8 @@ location village "xoxoxo"
 			if self.sprite != "aaa"
 				set self.sprite = "aaa"
 				waitForLoop self
+				waitForLoop self
+				waitForLoop self
 				set self.sprite = "frame1"
 			#=if !self.thread
 				print "starting cow"
@@ -78,3 +80,11 @@ set inventory.array = [
 	testItem1
 	testItem3
 ]
+
+set village.cow.sprite = "aaa"
+tween.start village.mouse 1000 0 2000
+tween.start village.cow 100 100 1000
+tween.wait village.cow
+tween.start village.cow -100 -200 500
+tween.wait village.cow
+set village.cow.sprite = "frame1"

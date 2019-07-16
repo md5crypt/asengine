@@ -33,7 +33,6 @@ location inventory
 		local inv = parent.array
 		local offset = parent.offset
 		local len = {length inv}
-		print "$offset $len"
 		if len <= offset + 3
 			set offset = len - 6
 			if offset < 0 set offset = 0
