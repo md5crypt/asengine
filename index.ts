@@ -33,7 +33,7 @@ class ArrayContainer extends PIXI.Container {
 	public hitTest(point: PIXI.Point) {
 		if (this.visible && this.interactive) {
 			const transformed = new PIXI.Point()
-			for (let i = this.children.length - 1; i > 0; i--) {
+			for (let i = this.children.length - 1; i >= 0; i--) {
 				const sprite = this.children[i]
 				if (sprite.visible && sprite.interactive) {
 					sprite.worldTransform.applyInverse(point, transformed)
@@ -152,7 +152,15 @@ class AsEngine {
 		this.rootContainer.on('pointertap', (e: PIXI.interaction.InteractionEvent) => {
 			const mmid = this.hitTest(e.data.global)
 			if (mmid) {
-				this.dispatch("click", mmid)
+				const point = this.rootContainer.worldTransform.applyInverse(e.data.global)
+				this.vm.vmCall(
+					this.dispatcher,
+					{type: AsVm.Type.INTEGER, value: point.y},
+					{type: AsVm.Type.INTEGER, value: point.x},
+					{type: this.objectMap.get(mmid)!.type, value: mmid},
+					{type: AsVm.Type.STRING, value: this.vm.intern("click")}
+				)
+				this.dirty = true
 			}
 		})
 		this.app.stage.on('mousemove', (e: PIXI.interaction.InteractionEvent) => {
@@ -165,9 +173,9 @@ class AsEngine {
 		})
 	}
 
-	public init(image: ArrayBuffer, resources: ResourceFile) {
+	public async init(image: ArrayBuffer, resources: ResourceFile) {
 		this.vm.vmInit(new Uint8Array(image))
-		this.loadResources(resources)
+		await this.loadResources(resources)
 		this.vm.vmRun()
 		this.readStageData()
 		this.initPointer()
@@ -312,7 +320,23 @@ class AsEngine {
 		return spriteMap
 	}
 
-	private loadResourceImages(resourceFile: ResourceFile) {
+	private async loadResourceImages(resourceFile: ResourceFile) {
+		const loader = PIXI.Loader.shared
+		for (const image of resourceFile.images) {
+			if (image.hash[0] != '@') {
+				loader.add(image.hash, `/images/${image.hash}.png`)
+			}
+		}
+		const resources = await new Promise<PIXI.IResourceDictionary>((resolve, reject) =>
+			loader.load((_loader: PIXI.Loader, resources: PIXI.IResourceDictionary) =>{
+				const errors = Object.values(resources).filter(x => x.error)
+				if (errors.length > 0) {
+					reject(errors[0])
+				}
+				resolve(resources)
+			})
+		)
+		console.log(resources)
 		const images = this.imageMap
 		for (const image of resourceFile.images){
 			const imageData: AsEngine.ImageData = {
@@ -320,7 +344,7 @@ class AsEngine {
 				width: image.width,
 			}
 			if (image.hash[0] != '@') {
-				imageData.texture = PIXI.Texture.from(`/images/${image.hash}.png`)
+				imageData.texture = resources[image.hash].texture
 			}
 			if (image.hitmap) {
 				const data = atob(image.hitmap)
@@ -358,8 +382,8 @@ class AsEngine {
 		return object
 	}
 
-	private loadResources(resourceFile: ResourceFile) {
-		this.loadResourceImages(resourceFile)
+	private async loadResources(resourceFile: ResourceFile) {
+		await this.loadResourceImages(resourceFile)
 		for (let i = 0; i < resourceFile.groups.length; i++) {
 			this.loadResourceGroup(resourceFile.groups[i], i)
 		}
@@ -517,12 +541,12 @@ class AsEngine {
 					(props.left || 0) + sprite.offset.x,
 					(props.top || 0) + sprite.offset.y
 				)
-				sprite.scale.set(Math.abs(props.scale || 1), props.scale || 1)
+				sprite.scale.set(props.scale || 1, Math.abs(props.scale || 1))
 				sprite.angle = props.rotation || 0
 			}
 			if (sprite != oldSprite) {
 				container.setChildAt(sprite, index)
-				if (this.animations.delete(oldSprite)) {
+				if (this.animations.delete(oldSprite) && !this.animations.has(sprite)) {
 					this.dispatch("animationDestroy", object.mmid)
 				}
 				oldSprite.destroy()
@@ -563,7 +587,7 @@ class AsEngine {
 
 	public tweenPush(tween: AsEngine.Tween) {
 		if (this.tweens.has(tween.mmid)) {
-			this.dispatch("tweenDestroy", tween.mmid)
+			//this.dispatch("tweenDestroy", tween.mmid)
 		}
 		tween.start = performance.now()
 		this.tweens.set(tween.mmid, tween)
@@ -775,25 +799,28 @@ window.addEventListener('load', async () => {
 		if (exception != AsVm.Exception.NONE) {
 			return exception
 		}
-		engine.pushThread(vm.$.vm_get_current_thread(), vm.getArgValue(top, 1, true))
+		engine.pushThread(vm.$.vm_get_current_thread(), vm.getArgValue(top, 1))
 		return AsVm.Exception.YIELD
 	})
 
 	vm.addFunction('__tweenPush', (top, argc) => {
-		const exception = checkArgs(top, argc, 4, AsVm.Type.HASHMAP, AsVm.Type.INTEGER, AsVm.Type.INTEGER, AsVm.Type.INTEGER)
+		const exception = checkArgs(top, argc, 4, AsVm.Type.HASHMAP, AsVm.Type.INTEGER, AsVm.Type.INTEGER, AsVm.Type.NUMERIC)
 		if (exception != AsVm.Exception.NONE) {
 			return exception
 		}
 		const mmid = vm.getArgValue(top, 1) as vm_mmid_t
 		const hashmap = vm.$.vm_memory_get_ptr(mmid) as vm_hashmap_t
 		const data = vm.readHashmapKeys(hashmap, [["left", AsVm.Type.INTEGER], ["top", AsVm.Type.INTEGER]]) as {top?: number, left?: number}
+		const speed = vm.getArgValue(top, 4) as number
+		const dx = vm.getArgValue(top, 2) as number
+		const dy = vm.getArgValue(top, 3) as number
 		engine.tweenPush({
 			mmid,
 			x0: data.left || 0,
 			y0: data.top || 0,
-			dx: vm.getArgValue(top, 2, true) as number,
-			dy: vm.getArgValue(top, 3, true) as number,
-			duration: vm.getArgValue(top, 4, true) as number
+			dx,
+			dy,
+			duration: (Math.sqrt((dx * dx) + (dy * dy)) / speed) * 1000
 		})
 		return AsVm.Exception.NONE
 	})
@@ -853,5 +880,5 @@ window.addEventListener('load', async () => {
 		return AsVm.Exception.NONE
 	})
 
-	engine.init(files[1].data as ArrayBuffer, files[2].data as ResourceFile)
+	await engine.init(files[1].data as ArrayBuffer, files[2].data as ResourceFile)
 })

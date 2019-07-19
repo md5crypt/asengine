@@ -83,6 +83,11 @@ namespace thread
 namespace tween
 	extern start '__tweenPush'
 	extern stop '__tweenDelete'
+	#extern trace '__tweenTrace'
+
+	function trace tmp x0 y0 x1 y1
+		return [x0 y0 x1 y1]
+
 	function wait target:hashmap
 		local list = target._tweenThreadList
 		if {istype list "array"}
@@ -90,6 +95,144 @@ namespace tween
 		else
 			set target._tweenThreadList = [{thread.current}]
 		_yield
+
+	namespace directions
+		function setRight target:object
+			print {nameof self}
+			if target.walkRight
+				set target.sprite = target.walkRight
+			elseif target.walkLeft
+				set target.sprite = target.walkLeft
+				set target.scale = -target.scale
+			else
+				throw "walkRight nither walkLeft is set in ${string.from target}"
+
+		function setLeft target:object
+			print {nameof self}
+			if target.walkLeft
+				set target.sprite = target.walkLeft
+			elseif target.walkRight
+				set target.sprite = target.walkRight
+				set target.scale = -target.scale
+			else
+				throw "walkRight nither walkLeft is set in ${string.from target}"
+
+		function setTop target:object
+			print {nameof self}
+			if target.walkTop
+				set target.sprite = target.walkTop
+				return true
+			return false
+
+		function setBottom target:object
+			print {nameof self}
+			if target.walkBottom
+				set target.sprite = target.walkBottom
+				return true
+			return false
+
+		function setTopRight target:object
+			print {nameof self}
+			if target.walkTopRight
+				set target.sprite = target.walkTopRight
+				return true
+			if target.walkTopLeft
+				set target.sprite = target.walkTopLeft
+				set target.scale = -target.scale
+				return true
+			return false
+
+		function setTopLeft target:object
+			print {nameof self}
+			if target.walkTopLeft
+				set target.sprite = target.walkTopLeft
+				return true
+			if target.walkTopRight
+				set target.sprite = target.walkTopRight
+				set target.scale = -target.scale
+				return true
+			return false
+
+		function setBottomRight target:object
+			print {nameof self}
+			if target.walkBottomRight
+				set target.sprite = target.walkBottomRight
+				return true
+			if target.walkBottomLeft
+				set target.sprite = target.walkBottomLeft
+				set target.scale = -target.scale
+				return true
+			return false
+
+		function setBottomLeft target:object
+			print {nameof self}
+			if target.walkBottomLeft
+				set target.sprite = target.walkBottomLeft
+				return true
+			if target.walkBottomRight
+				set target.sprite = target.walkBottomRight
+				set target.scale = -target.scale
+				return true
+			return false
+
+	function walk target:object x:integer y:integer
+		set target.scale = target.scale || 1
+		local path = {tween.trace target.parent.surface target.left target.top x y}
+		set target.scale = target.scale || 1
+		for i in 2:{length path}:2
+			set target.scale = target.scale > 0 ? target.scale : -target.scale
+			local dx = (path i + 0) - (path i - 2)
+			local dy = (path i + 1) - (path i - 1)
+			print dx dy
+			if dx > 0
+				if dy > 0
+					if dx > dy
+						if dx > (2 * dy)
+							directions.setRight target
+						else
+							nop {directions.setBottomRight target} || {directions.setRight target}
+					else
+						if dy > (2 * dx)
+							nop {directions.setBottom target} || {directions.setBottomRight target} || {directions.setRight target}
+						else
+							nop {directions.setBottomRight target} || {directions.setRight target}
+				else
+					if dx > -dy
+						if dx > (-2 * dy)
+							directions.setRight target
+						else
+							nop {directions.setTopRight target} || {directions.setRight target}
+					else
+						if -dy > (2 * dx)
+							nop {directions.setTop target} || {directions.setTopRight target} || {directions.setRight target}
+						else
+							nop {directions.setTopRight target} || {directions.setRight target}
+			else
+				if dy > 0
+					if -dx > dy
+						if -dx > (2 * dy)
+							directions.setLeft target
+						else
+							nop {directions.setBottomLeft target} || {directions.setLeft target}
+					else
+						if dy > (-2 * dx)
+							nop {directions.setBottom target} || {directions.setBottomLeft target} || {directions.setLeft target}
+						else
+							nop {directions.setBottomLeft target} || {directions.setLeft target}
+				else
+					if -dx > -dy
+						if -dx > (-2 * dy)
+							directions.setLeft target
+						else
+							nop {directions.setTopLeft target} || {directions.setLeft target}
+					else
+						if -dy > (-2 * dx)
+							nop {directions.setTop target} || {directions.setTopLeft target} || {directions.setLeft target}
+						else
+							nop {directions.setTopLeft target} || {directions.setLeft target}
+			tween.start target dx dy target.speed
+			tween.wait target
+			# animation.wait target
 
 namespace stdlib
 	import [
@@ -134,12 +277,35 @@ namespace __system
 				else
 					thread.resume {array.pop list}
 
+	function walkWrapper loc:location x:integer y:integer
+		local target = loc.player
+		if target.walkThread
+			print "notset"
+			thread.reattach target.walkThread
+		else
+			print "set"
+			set target.savedSprite = target.sprite
+			set target.savedSign = (target.scale || 1) > 0
+		set target.walkThread = {thread.current}
+		tween.walk target x y
+		unset target.walkThread
+		print target.savedSprite
+		set target.sprite = target.savedSprite
+		if (target.scale > 0) != target.savedSign
+			set target.scale = -target.scale
+
 	namespace events
-		function click target:object
-			if !target.disabled
-				local func = target.__on_use
-				if func
-					func
+		function click target:namespace x:integer y:integer
+			if {typeof target} == "location"
+				if target.walkable
+					walkWrapper target x y
+			elseif {typeof target} == "object"
+				if target.parent.walkable && target.parent.player != target
+					walkWrapper target.parent x y
+				if !target.disabled && target.__on_use
+					target.__on_use
+			else
+				throw "invalid event target $(target)"
 		function animationLoop target:object
 			processThreadList target._animationThreadList
 		function animationDestroy target:object
@@ -154,20 +320,30 @@ namespace __system
 		function pointerLeave target:object
 			set __system.cursor.sprite = "default"
 
-	function dispatch event:string target:object
+	function dispatch event:string target:namespace x?:integer y?:integer
 		print "$event ${string.from target}"
-		(events event) target
+		if event == "click"
+			events.click target x y
+		else
+			(events event) target
 
 	set self.stage = [stage.main stage.ui]
 	object cursor
 
-function waitForLoop target:object
-	local list = target._animationThreadList
-	if {istype list "array"}
-		array.push list {thread.current}
-	else
-		set target._animationThreadList = [{thread.current}]
-	_yield
+namespace animation
+	function once target:object sprite:string
+		local savedSprite = target.sprite
+		set target.sprite = sprite
+		animation.wait target
+		set target.sprite = savedSprite
+		_yield
+	function wait target:object
+		local list = target._animationThreadList
+		if {istype list "array"}
+			array.push list {thread.current}
+		else
+			set target._animationThreadList = [{thread.current}]
+		_yield
 
 function trigger o:namespace name:string target?:namespace
 	local func = (o "__on_$name")

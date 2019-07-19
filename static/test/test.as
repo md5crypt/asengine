@@ -7,13 +7,17 @@ location village "xoxoxo"
 	object test2
 		on use inventory.show
 
+	object stone
+		on use set self.sprite = "big"
+
+
 	object cow
 		on use
 			if self.sprite != "aaa"
 				set self.sprite = "aaa"
-				waitForLoop self
-				waitForLoop self
-				waitForLoop self
+				animation.wait self
+				animation.wait self
+				animation.wait self
 				set self.sprite = "frame1"
 			#=if !self.thread
 				print "starting cow"
@@ -82,9 +86,20 @@ set inventory.array = [
 ]
 
 set village.cow.sprite = "aaa"
-tween.start village.mouse 1000 0 2000
-tween.start village.cow 100 100 1000
-tween.wait village.cow
-tween.start village.cow -100 -200 500
+tween.start village.mouse 1000 0 100
+tween.start village.cow 200 200 1000
 tween.wait village.cow
 set village.cow.sprite = "frame1"
+
+set village.walkable
+set village.player = village.cow
+set village.cow.walkRight = "aaa"
+set village.cow.speed = 500
+
+while true
+	tween.wait village.mouse
+	set village.mouse.scale = -1
+	tween.start village.mouse -1000 0 100
+	tween.wait village.mouse
+	set village.mouse.scale = 1
+	tween.start village.mouse 1000 0 100
