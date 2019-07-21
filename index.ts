@@ -289,7 +289,10 @@ class AsEngine {
 				}
 			}
 
-			this.tweenProcess(time)
+			if (this.tweens.size > 0) {
+				this.tweenProcess(time)
+				this.dirty = true
+			}
 
 			if (this.cursorMoved) {
 				this.cursorMoved = false
@@ -389,6 +392,17 @@ class AsEngine {
 					spriteData = frameData
 					break
 				} case rcf.ResourceImageType.TEXT: {
+					const quad = sprite as rcf.ResourceQuad
+					const frameData: AsEngine.QuadSpriteData = {
+						type: sprite.type,
+						left: quad.left,
+						top: quad.top,
+						width: quad.width,
+						height: quad.height
+					}
+					spriteData = frameData
+					break
+				} case rcf.ResourceImageType.QUAD: {
 					const quad = sprite as rcf.ResourceQuad
 					const frameData: AsEngine.QuadSpriteData = {
 						type: sprite.type,
@@ -699,19 +713,48 @@ class AsEngine {
 		const rmList: vm_mmid_t[] = []
 		for (const tween of this.tweens.values()) {
 			const current = time - tween.start!
-			const k = Math.min(1, current / tween.duration)
-			const x = Math.floor(tween.x0 + (k * tween.dx))
-			const y = Math.floor(tween.y0 + (k * tween.dy))
-			let hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
-			this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("left"), x, AsVm.Type.INTEGER)
-			hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
-			this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("top"), y, AsVm.Type.INTEGER)
-			if ((tween.xLast != x) || (tween.yLast != y)) {
-				this.dirty = true
-				tween.xLast = x
-				tween.yLast = y
+			let complete = true
+			if (tween.x) {
+				let delta = (tween.x.speed * current) + (tween.x.acceleration * tween.x.acceleration * current) / 2
+				if (Math.abs(delta) >= Math.abs(tween.x.delta)) {
+					delta = tween.x.delta
+				} else {
+					complete = false
+				}
+				const hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
+				this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("left"), Math.floor(tween.x.start + delta), AsVm.Type.INTEGER)
 			}
-			if (k == 1) {
+			if (tween.y) {
+				let delta = (tween.y.speed * current) + (tween.y.acceleration * tween.y.acceleration * current) / 2
+				if (Math.abs(delta) >= Math.abs(tween.y.delta)) {
+					delta = tween.y.delta
+				} else {
+					complete = false
+				}
+				const hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
+				this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("top"), Math.floor(tween.y.start + delta), AsVm.Type.INTEGER)
+			}
+			if (tween.scale) {
+				let delta = (tween.scale.speed * current) + (tween.scale.acceleration * tween.scale.acceleration * current) / 2
+				if (Math.abs(delta) >= Math.abs(tween.scale.delta)) {
+					delta = tween.scale.delta
+				} else {
+					complete = false
+				}
+				const hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
+				this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("scale"), tween.scale.start + delta, AsVm.Type.FLOAT)
+			}
+			if (tween.angle) {
+				let delta = (tween.angle.speed * current) + (tween.angle.acceleration * tween.angle.acceleration * current) / 2
+				if (Math.abs(delta) >= Math.abs(tween.angle.delta)) {
+					delta = tween.angle.delta
+				} else {
+					complete = false
+				}
+				const hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
+				this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("angle"), tween.angle.start + delta, AsVm.Type.FLOAT)
+			}
+			if (complete) {
 				this.dispatch("tweenEnd", tween.mmid)
 				rmList.push(tween.mmid)
 			}
@@ -831,15 +874,19 @@ namespace AsEngine {
 		disabled?: boolean
 	}
 
+	interface TweenData {
+		start: number
+		delta: number
+		speed: number
+		acceleration: number
+	}
+
 	export interface Tween {
 		mmid: vm_mmid_t
-		x0: number
-		y0: number
-		dx: number
-		dy: number
-		duration: number
-		xLast?: number,
-		yLast?: number,
+		x?: TweenData
+		y?: TweenData
+		scale?: TweenData
+		angle?: TweenData
 		start?: number
 	}
 }
@@ -909,6 +956,8 @@ window.addEventListener('load', async () => {
 		return AsVm.Exception.YIELD
 	})
 
+	//vm.addFunction('__tweenPush', (top, argc) => {
+
 	vm.addFunction('__tweenPush', (top, argc) => {
 		const exception = checkArgs(top, argc, 4, AsVm.Type.HASHMAP, AsVm.Type.INTEGER, AsVm.Type.INTEGER, AsVm.Type.NUMERIC)
 		if (exception != AsVm.Exception.NONE) {
@@ -917,16 +966,14 @@ window.addEventListener('load', async () => {
 		const mmid = vm.getArgValue(top, 1) as vm_mmid_t
 		const hashmap = vm.$.vm_memory_get_ptr(mmid) as vm_hashmap_t
 		const data = vm.readHashmapKeys(hashmap, [["left", AsVm.Type.INTEGER], ["top", AsVm.Type.INTEGER]]) as {top?: number, left?: number}
-		const speed = vm.getArgValue(top, 4) as number
+		const speed = vm.getArgValue(top, 4) / 1000
 		const dx = vm.getArgValue(top, 2) as number
 		const dy = vm.getArgValue(top, 3) as number
+		const time = Math.sqrt((dx * dx) + (dy * dy)) / speed
 		engine.tweenPush({
 			mmid,
-			x0: data.left || 0,
-			y0: data.top || 0,
-			dx,
-			dy,
-			duration: (Math.sqrt((dx * dx) + (dy * dy)) / speed) * 1000
+			x: {start: data.left || 0, delta: dx, acceleration: 0, speed: dx / time},
+			y: {start: data.top || 0, delta: dy, acceleration: 0, speed: dy / time}
 		})
 		return AsVm.Exception.NONE
 	})
