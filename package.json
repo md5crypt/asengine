@@ -9,7 +9,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@types/axios": "^0.14.0",
     "@types/node": "^11.13.8",
     "axios": "^0.18.0",
     "browserify": "^16.2.3",

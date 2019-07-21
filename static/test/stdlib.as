@@ -83,10 +83,7 @@ namespace thread
 namespace tween
 	extern start '__tweenPush'
 	extern stop '__tweenDelete'
-	#extern trace '__tweenTrace'
-
-	function trace tmp x0 y0 x1 y1
-		return [x0 y0 x1 y1]
+	extern trace '__tracePath'
 
 	function wait target:hashmap
 		local list = target._tweenThreadList
@@ -177,7 +174,7 @@ namespace tween
 
 	function walk target:object x:integer y:integer
 		set target.scale = target.scale || 1
-		local path = {tween.trace target.parent.surface target.left target.top x y}
+		local path = {tween.trace target.parent target.parent.surface target.left target.top x y}
 		set target.scale = target.scale || 1
 		for i in 2:{length path}:2
 			set target.scale = target.scale > 0 ? target.scale : -target.scale

@@ -85,21 +85,20 @@ set inventory.array = [
 	testItem3
 ]
 
-set village.cow.sprite = "aaa"
-tween.start village.mouse 1000 0 100
-tween.start village.cow 200 200 1000
-tween.wait village.cow
 set village.cow.sprite = "frame1"
+set village.cow.left = 810
+set village.cow.top = 532
 
+set village.surface = "test"
 set village.walkable
 set village.player = village.cow
 set village.cow.walkRight = "aaa"
 set village.cow.speed = 500
 
 while true
+	set village.mouse.scale = 1
+	tween.start village.mouse 1000 0 100
 	tween.wait village.mouse
 	set village.mouse.scale = -1
 	tween.start village.mouse -1000 0 100
 	tween.wait village.mouse
-	set village.mouse.scale = 1
-	tween.start village.mouse 1000 0 100

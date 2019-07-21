@@ -1,5 +1,5 @@
-import { AsVm, vm_mmid_t, vm_variable_t, vm_hashmap_t, vm_thread_t, vm_array_t } from "./casvm/emscripten/asvm"
-import { ResourceFile, ResourceFrame, ResourceGroup, ResourceImageType, ResourceSprite, ResourceAnimation } from "./asrc/ResourceFile"
+import { AsVm, vm_mmid_t, vm_variable_t, vm_hashmap_t, vm_thread_t, vm_array_t, void_ptr_t } from "./casvm/emscripten/asvm"
+import * as rcf from "./asrc/ResourceFile"
 
 declare module "pixi.js" {
 	interface Sprite {
@@ -14,6 +14,73 @@ declare module "pixi.js" {
 interface ThreadTimer {
 	expire: number
 	thread: vm_mmid_t
+}
+
+function loadBase64String(str: string) {
+	const data = atob(str)
+	const output = new Uint8Array(data.length)
+	for (let i = 0; i < data.length; i++) {
+		output[i] = data.charCodeAt(i)
+	}
+	return output
+}
+
+class ThetaStarHelper {
+	private vm: AsVm
+	private grid: void_ptr_t | null
+	private data: Uint8Array | null
+	private width: number
+
+	constructor(vm: AsVm) {
+		this.vm = vm
+		this.grid = null
+		this.data = null
+		this.width = 0
+	}
+
+	public load(data: Uint8Array, width: number, height: number) {
+		if (this.data == data) {
+			return
+		}
+		if (this.grid) {
+			this.vm.$.free(this.grid)
+		}
+		const grid = this.vm.$.malloc((width * height) + 8)
+		this.data = data
+		this.grid = grid as void_ptr_t
+		this.width = width
+		this.vm.$u32[(grid + 0) / 4] = width
+		this.vm.$u32[(grid + 4) / 4] = height
+		const view = this.vm.$u8.subarray(grid + 8, grid + 8 + (width * height))
+		let acc = 0
+		for (let i = 0; i < (width * height); i++) {
+			if ((i & 7) == 0) {
+				acc = data[i >> 3]
+			}
+			view[i] = acc & 1
+			acc >>= 1
+		}
+	}
+
+	public getPath(x0: number, y0: number, x1: number, y1: number) {
+		if (this.grid === null) {
+			throw new Error("no image data loaded")
+		}
+		const goal = this.vm.$.find_closest(this.grid, x1, y1)
+		const start = x0 + (y0 * this.width)
+		const ptr = this.vm.$.theta_star(this.grid, start, goal, 1.2)
+		if (ptr == 0) {
+			return null
+		}
+		const path: number[] = []
+		let current = ptr / 4
+		while(this.vm.$u32[current] != 0xFFFFFFFF) {
+			path.push(this.vm.$u32[current])
+			current += 1
+		}
+		this.vm.$.free(ptr)
+		return path.reverse()
+	}
 }
 
 class ArrayContainer extends PIXI.Container {
@@ -173,7 +240,7 @@ class AsEngine {
 		})
 	}
 
-	public async init(image: ArrayBuffer, resources: ResourceFile) {
+	public async init(image: ArrayBuffer, resources: rcf.ResourceFile) {
 		this.vm.vmInit(new Uint8Array(image))
 		await this.loadResources(resources)
 		this.vm.vmRun()
@@ -280,39 +347,77 @@ class AsEngine {
 		this.timers.sort((a, b) => a.expire - b.expire)
 	}
 
-	private buildSpriteMap(sprites: ResourceSprite[]) {
+	private buildSpriteMap(sprites: rcf.ResourceSprite[]) {
 		const vm = this.vm
 		const images = this.imageMap
 		const spriteMap: Map<vm_mmid_t, AsEngine.SpriteData> = new Map()
 		const defaultKey = vm.intern("default")
 		for (const sprite of sprites) {
 			let spriteData: AsEngine.SpriteData
-			if (sprite.type == ResourceImageType.ANIMATION) {
-				const animation = sprite as ResourceAnimation
-				const animationData: AsEngine.AnimationSpriteData = {
-					type: sprite.type,
-					id: this.spriteMap.size,
-					frames: animation.frames.map(frame => ({
-						delay: frame.delay,
-						top: frame.top,
+			switch (sprite.type) {
+				case rcf.ResourceImageType.ANIMATION: {
+					const animation = sprite as rcf.ResourceAnimation
+					const animationData: AsEngine.AnimationSpriteData = {
+						type: sprite.type,
+						frames: animation.frames.map(frame => ({
+							delay: frame.delay,
+							top: frame.top,
+							left: frame.left,
+							image: images.get(frame.image)!
+						}))
+					}
+					spriteData = animationData
+					break
+				} case rcf.ResourceImageType.FRAME: {
+					const frame = sprite as rcf.ResourceFrame
+					const frameData: AsEngine.FrameSpriteData = {
+						type: sprite.type,
+						image: images.get(frame.image)!,
 						left: frame.left,
-						image: images.get(frame.image)!
-					}))
-				}
-				spriteData = animationData
-			} else {
-				const frame = sprite as ResourceFrame
-				const frameData: AsEngine.FrameSpriteData = {
-					type: sprite.type,
-					image: images.get(frame.image)!,
-					left: frame.left,
-					top: frame.top,
-					id: this.spriteMap.size
-				}
-				spriteData = frameData
+						top: frame.top,
+					}
+					spriteData = frameData
+					break
+				} case rcf.ResourceImageType.PROXY:
+				case rcf.ResourceImageType.POINT: {
+					const point = sprite as rcf.ResourcePoint
+					const frameData: AsEngine.PointSpriteData = {
+						type: sprite.type,
+						left: point.left,
+						top: point.top,
+					}
+					spriteData = frameData
+					break
+				} case rcf.ResourceImageType.TEXT: {
+					const quad = sprite as rcf.ResourceQuad
+					const frameData: AsEngine.QuadSpriteData = {
+						type: sprite.type,
+						left: quad.left,
+						top: quad.top,
+						width: quad.width,
+						height: quad.height
+					}
+					spriteData = frameData
+					break
+				} case rcf.ResourceImageType.WALKMAP: {
+					const bitmap = sprite as rcf.ResourceBitmap
+					const frameData: AsEngine.BitmapSpriteData = {
+						type: sprite.type,
+						left: bitmap.left,
+						top: bitmap.top,
+						width: bitmap.width,
+						height: bitmap.height,
+						scale: bitmap.scale || 1,
+						data: loadBase64String(bitmap.data)
+					}
+					spriteData = frameData
+					break
+				} default:
+					throw new Error(`Unknown resource type: ${sprite.type}`)
 			}
+
 			spriteMap.set(vm.intern(sprite.name), spriteData)
-			this.spriteMap.set(spriteData.id, spriteData)
+			this.spriteMap.set(this.spriteMap.size, spriteData)
 		}
 		if (!spriteMap.has(defaultKey) && (sprites.length > 0)) {
 			spriteMap.set(defaultKey, spriteMap.get(vm.intern(sprites[0].name))!)
@@ -320,12 +425,10 @@ class AsEngine {
 		return spriteMap
 	}
 
-	private async loadResourceImages(resourceFile: ResourceFile) {
+	private async loadResourceImages(resourceFile: rcf.ResourceFile) {
 		const loader = PIXI.Loader.shared
 		for (const image of resourceFile.images) {
-			if (image.hash[0] != '@') {
-				loader.add(image.hash, `/images/${image.hash}.png`)
-			}
+			loader.add(image.hash, `/images/${image.hash}.png`)
 		}
 		const resources = await new Promise<PIXI.IResourceDictionary>((resolve, reject) =>
 			loader.load((_loader: PIXI.Loader, resources: PIXI.IResourceDictionary) =>{
@@ -343,22 +446,15 @@ class AsEngine {
 				height: image.height,
 				width: image.width,
 			}
-			if (image.hash[0] != '@') {
-				imageData.texture = resources[image.hash].texture
-			}
+			imageData.texture = resources[image.hash].texture
 			if (image.hitmap) {
-				const data = atob(image.hitmap)
-				const hitmap = new Uint8Array(data.length)
-				for (let i = 0; i < data.length; i++) {
-					hitmap[i] = data.charCodeAt(i)
-				}
-				imageData.hitmap = hitmap
+				imageData.hitmap = loadBase64String(image.hitmap)
 			}
 			images.set(image.hash, imageData)
 		}
 	}
 
-	private loadResourceGroup(group: ResourceGroup, zindex: number, parent?: vm_mmid_t) {
+	private loadResourceGroup(group: rcf.ResourceGroup, zindex: number, parent?: vm_mmid_t) {
 		const vm = this.vm
 		const vmVariable = vm.resolve(group.name, parent)
 		if (!AsVm.isType(vmVariable.type, AsVm.Type.HASHMAP)) {
@@ -382,7 +478,7 @@ class AsEngine {
 		return object
 	}
 
-	private async loadResources(resourceFile: ResourceFile) {
+	private async loadResources(resourceFile: rcf.ResourceFile) {
 		await this.loadResourceImages(resourceFile)
 		for (let i = 0; i < resourceFile.groups.length; i++) {
 			this.loadResourceGroup(resourceFile.groups[i], i)
@@ -439,7 +535,7 @@ class AsEngine {
 		const hashmap = vm.$.vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		let sprite: PIXI.Sprite | null = null
 		switch (spriteData.type) {
-			case ResourceImageType.FRAME: {
+			case rcf.ResourceImageType.FRAME: {
 				const frame = spriteData as AsEngine.FrameSpriteData
 				if (old.spriteData == frame) {
 					sprite = old
@@ -452,8 +548,8 @@ class AsEngine {
 					sprite.offset = new PIXI.Point(frame.left, frame.top)
 				}
 				break
-			} case ResourceImageType.PROXY: {
-				const frame = spriteData as AsEngine.FrameSpriteData
+			} case rcf.ResourceImageType.PROXY: {
+				const point = spriteData as AsEngine.PointSpriteData
 				const exProps = vm.readHashmapKeys(hashmap, AsEngine.proxyObjectProps) as AsEngine.ProxyObjectProps
 				const proxyObject = exProps.proxyObject && this.objectMap.get(exProps.proxyObject)
 				if (!proxyObject) {
@@ -469,29 +565,29 @@ class AsEngine {
 				sprite = this.createSprite(proxySprite, proxyObject, old)
 				if (sprite) {
 					sprite.object = object
-					sprite.offset.set(frame.left, frame.top)
+					sprite.offset.set(point.left, point.top)
 				}
 				break
-			} case ResourceImageType.TEXT: {
-				const frame = spriteData as AsEngine.FrameSpriteData
+			} case rcf.ResourceImageType.TEXT: {
+				const quad = spriteData as AsEngine.QuadSpriteData
 				const exProps = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
 				const text = exProps.text ? vm.readVmString(exProps.text) : 'no text'
 				const style = exProps.font ? this.getTextStyle(exProps.font) : AsEngine.fallbackTextStyle
-				if (old.spriteData == frame) {
+				if (old.spriteData == quad) {
 					(old as PIXI.Text).text = text;
 					(old as PIXI.Text).style = style
 					sprite = old
 				} else {
 					sprite = new PIXI.Text(text, style)
-					sprite.hitArea = new PIXI.Rectangle(0, 0, frame.image.width, frame.image.height)
-					sprite.spriteData = frame
+					sprite.hitArea = new PIXI.Rectangle(0, 0, quad.width, quad.height)
+					sprite.spriteData = quad
 					sprite.object = object
-					sprite.pivot.set(frame.image.width/2, frame.image.height/2)
-					sprite.offset = new PIXI.Point(frame.left, frame.top)
+					sprite.pivot.set(quad.width/2, quad.height/2)
+					sprite.offset = new PIXI.Point(quad.left, quad.top)
 				}
 				break
 			}
-			case ResourceImageType.ANIMATION: {
+			case rcf.ResourceImageType.ANIMATION: {
 				const data = spriteData as AsEngine.AnimationSpriteData
 				if (old.spriteData == data) {
 					sprite = old
@@ -662,23 +758,32 @@ namespace AsEngine {
 	}
 
 	export interface SpriteData {
-		type: ResourceImageType
-		id: number
+		type: rcf.ResourceImageType
 	}
 
-	export interface FrameData {
-		image: ImageData
+	export interface PointSpriteData extends SpriteData {
 		top: number
 		left: number
 	}
 
-	export interface FrameSpriteData extends SpriteData, FrameData {
-		image: ImageData
-		top: number
-		left: number
+	export interface QuadSpriteData extends PointSpriteData {
+		width: number
+		height: number
 	}
 
-	export interface AnimationFrameData extends FrameData {
+	export interface BitmapSpriteData extends QuadSpriteData {
+		data: Uint8Array
+		scale: number
+	}
+
+	export interface FrameSpriteData extends PointSpriteData {
+		image: ImageData
+	}
+
+	export interface AnimationFrameData {
+		top: number
+		left: number
+		image: ImageData
 		delay: number
 	}
 
@@ -768,6 +873,7 @@ window.addEventListener('load', async () => {
 	])
 
 	const vm = await AsVm.create(files[0].data as ArrayBuffer)
+	const thetaStarHelper = new ThetaStarHelper(vm)
 	const engine = new AsEngine(vm, app)
 	// resize()
 
@@ -835,6 +941,63 @@ window.addEventListener('load', async () => {
 		return AsVm.Exception.NONE
 	})
 
+	vm.addFunction('__tracePath', (top, argc) => {
+		const exception = checkArgs(
+			top, argc, 6, AsVm.Type.HASHMAP, AsVm.Type.STRING,
+			AsVm.Type.INTEGER, AsVm.Type.INTEGER,
+			AsVm.Type.INTEGER, AsVm.Type.INTEGER
+		)
+		if (exception != AsVm.Exception.NONE) {
+			return exception
+		}
+		const object = engine.objectMap.get(vm.getArgValue(top, 1) as vm_mmid_t)
+		if (!object) {
+			vm.setReturnValue(top, vm.createVmString("invalid object"), AsVm.Type.STRING)
+			return AsVm.Exception.USER
+		}
+		const sprite = object.spriteMap.get(vm.getArgValue(top, 2) as vm_mmid_t) as AsEngine.BitmapSpriteData
+		if (!sprite || (sprite.type != rcf.ResourceImageType.WALKMAP)) {
+			vm.setReturnValue(top, vm.createVmString("invalid spirte"), AsVm.Type.STRING)
+			return AsVm.Exception.USER
+		}
+		const width = Math.floor(sprite.width) / sprite.scale
+		const height = Math.floor(sprite.height) / sprite.scale
+		thetaStarHelper.load(sprite.data, width, height)
+		const x0 = vm.getArgValue(top, 3) as number
+		const y0 = vm.getArgValue(top, 4) as number
+		const x1 = vm.getArgValue(top, 5) as number
+		const y1 = vm.getArgValue(top, 6) as number
+		const xOffset = Math.floor(sprite.left - (sprite.width / 2))
+		const yOffset = Math.floor(sprite.top - (sprite.height / 2))
+		const scaledX1 = Math.floor((x1 - xOffset) / sprite.scale)
+		const scaledY1 = Math.floor((y1 - yOffset) / sprite.scale)
+		const path = thetaStarHelper.getPath(
+			Math.floor((x0 - xOffset) / sprite.scale),
+			Math.floor((y0 - yOffset) / sprite.scale),
+			scaledX1,
+			scaledY1,
+		)
+		if (path === null) {
+			return AsVm.Exception.NONE
+		}
+		const output = [x0, y0]
+		for (let i = 1; i < path.length; i++) {
+			const xPos = ((path[i] % width) * sprite.scale) + xOffset
+			const yPos = (Math.floor(path[i] / width) * sprite.scale) + yOffset
+			output.push(xPos, yPos)
+		}
+		if (path[path.length - 1] == (scaledX1 + (scaledY1 * width))) {
+			output[output.length - 2] = x1
+			output[output.length - 1] = y1
+		}
+		vm.setReturnValue(
+			top,
+			vm.createArray(output.map(x => ({value: x, type: AsVm.Type.INTEGER}))),
+			AsVm.Type.ARRAY
+		)
+		return AsVm.Exception.NONE
+	})
+
 	vm.addFunction('__textMeasure', (top, argc) => {
 		const exception = checkArgs(top, argc, 3, AsVm.Type.STRING, AsVm.Type.HASHMAP, AsVm.Type.STRING)
 		if (exception != AsVm.Exception.NONE) {
@@ -850,19 +1013,19 @@ window.addEventListener('load', async () => {
 			vm.setReturnValue(top, vm.createVmString("sprite not found"), AsVm.Type.STRING)
 			return AsVm.Exception.USER
 		}
-		if (sprite.type != ResourceImageType.TEXT) {
+		if (sprite.type != rcf.ResourceImageType.TEXT) {
 			vm.setReturnValue(top, vm.createVmString("sprite is not a text sprite"), AsVm.Type.STRING)
 			return AsVm.Exception.USER
 		}
-		const frame = sprite as AsEngine.FrameSpriteData
+		const quad = sprite as AsEngine.QuadSpriteData
 		const text = vm.readVmString(vm.getArgValue(top, 1) as vm_mmid_t).replace(/\s+/g, ' ').trim()
 		const hashmap = vm.$.vm_memory_get_ptr(object.mmid) as vm_hashmap_t
 		const props = vm.readHashmapKeys(hashmap, AsEngine.textObjectProps) as AsEngine.TextObjectProps
 		const result = PIXI.TextMetrics.measureText(
 			text,
-			props.font ? engine.getTextStyle(props.font, frame.image.width) : AsEngine.fallbackTextStyle
+			props.font ? engine.getTextStyle(props.font, quad.width) : AsEngine.fallbackTextStyle
 		)
-		const linesPerFrame = Math.floor(frame.image.height / result.lineHeight)
+		const linesPerFrame = Math.floor(quad.height / result.lineHeight)
 		const blocks: string[] = []
 		while (result.lines.length > linesPerFrame) {
 			blocks.push(result.lines.splice(0, linesPerFrame).join('\n'))
@@ -880,5 +1043,5 @@ window.addEventListener('load', async () => {
 		return AsVm.Exception.NONE
 	})
 
-	await engine.init(files[1].data as ArrayBuffer, files[2].data as ResourceFile)
+	await engine.init(files[1].data as ArrayBuffer, files[2].data as rcf.ResourceFile)
 })
