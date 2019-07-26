@@ -742,7 +742,7 @@ class AsEngine {
 					complete = false
 				}
 				const hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
-				this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("scale"), tween.scale.start + delta, AsVm.Type.FLOAT)
+				this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("scale"), AsVm.floatToRaw(tween.scale.start + delta), AsVm.Type.FLOAT)
 			}
 			if (tween.angle) {
 				let delta = (tween.angle.speed * current) + (tween.angle.acceleration * tween.angle.acceleration * current) / 2
@@ -751,8 +751,14 @@ class AsEngine {
 				} else {
 					complete = false
 				}
+				let fi = tween.angle.start + delta
+				if (fi > 360) {
+					fi -= 360
+				} else if (fi < 0) {
+					fi += 360
+				}
 				const hashmap = this.vm.$.vm_memory_get_ptr(tween.mmid) as vm_hashmap_t
-				this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("angle"), tween.angle.start + delta, AsVm.Type.FLOAT)
+				this.vm.$.vm_hashmap_set(hashmap, this.vm.intern("rotation"), AsVm.floatToRaw(tween.angle.start + delta), AsVm.Type.FLOAT)
 			}
 			if (complete) {
 				this.dispatch("tweenEnd", tween.mmid)
